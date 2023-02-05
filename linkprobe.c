@@ -21,7 +21,7 @@
 #include "ipudp.h"
 
 #ifndef unlikely
-#define unlikely(x)	__builtin_expect((x), 0)
+#define unlikely(x)	__builtin_expect(!!(x), 0)
 #endif
 
 static volatile int global_exit = 0;
@@ -580,8 +580,9 @@ int main(int argc, char *argv[])
 	if (unlikely(dlsock == -1)) {
 		fprintf(stderr, "Unable to open AF_PACKET socket: %s\n",
 				strerror(errno));
-		exit(5);
+		exit(errno);
 	}
+
 	memset(&me, 0, sizeof(me));
 	me.sll_family = AF_PACKET;
 	me.sll_protocol = htons(ETH_P_IP);

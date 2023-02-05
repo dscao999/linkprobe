@@ -7,7 +7,7 @@
 #include "enumnet.h"
 
 #ifndef unlikely
-#define unlikely(x)	__builtin_expect((x), 0)
+#define unlikely(x)	__builtin_expect(!!(x), 0)
 #endif
 
 static int get_netindex(const char *ifname)

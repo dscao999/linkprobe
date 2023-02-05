@@ -15,7 +15,7 @@
 #include "subserver.h"
 
 #ifndef unlikely
-#define unlikely(x)	__builtin_expect((x), 0)
+#define unlikely(x)	__builtin_expect(!!(x), 0)
 #endif
 
 static volatile int global_exit = 0;
