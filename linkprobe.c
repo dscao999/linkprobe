@@ -546,8 +546,8 @@ static int check_instance(void)
 				dentry->d_name[0] > '9')
 			continue;
 		sprintf(procpath, "/proc/%s/exe", dentry->d_name);
-		realpath(procpath, exename);
-		if (strcmp(exename, selfname) == 0)
+		if (realpath(procpath, exename) &&
+				strcmp(exename, selfname) == 0)
 			num += 1;
 		errno = 0;
 	}
