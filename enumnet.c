@@ -30,7 +30,7 @@ static int get_netindex(const char *ifname)
 	return idx;
 }
 
-int mac2bin(const char *mac, char *buf, int len)
+int mac2bin(const char *mac, unsigned char *buf, int len)
 {
 	int pos, maclen;
 	char *macbuf, *rc;
@@ -55,7 +55,7 @@ int mac2bin(const char *mac, char *buf, int len)
 	return pos;
 }
 
-static int get_macaddr(const char *ifname, char *macbuf, int maclen)
+static int get_macaddr(const char *ifname, unsigned char *macbuf, int maclen)
 {
 	FILE *fin;
 	char buf[32];

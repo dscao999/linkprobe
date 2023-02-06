@@ -80,6 +80,8 @@ const struct udp_packet * udp_payload(const char *l2buf, int len)
 	char tmstamp[32];
 	FILE *fout;
 
+	if (l2buf == NULL || len < 28)
+		return NULL;
 	iph = (const struct iphdr *)l2buf;
 	ck = iphdr_check(iph);
 	if (unlikely(ck != 0)) {
