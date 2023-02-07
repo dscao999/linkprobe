@@ -126,7 +126,7 @@ static int nic_check(const char *iface, const struct list_head *ifhead,
 	return opt->ifindex;
 }
 
-static void parse_option(int argc, char *argv[], struct cmdopts *exopt)
+static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 {
 	static const struct option options[] = {
 		{
@@ -171,13 +171,14 @@ static void parse_option(int argc, char *argv[], struct cmdopts *exopt)
 	static const unsigned short defdur = 20;
 	extern char *optarg;
 	extern int optind, opterr, optopt;
-	int fin, c, ncards;
+	int fin, c, ncards, retv;
 	char *iface;
 
+	retv = 0;
 	ncards = enumerate_cards(&ifhead);
 	if (ncards == 0) {
 		fprintf(stderr, "No NIC ports found!\n");
-		exit(0);
+		return 251;
 	}
 	memset(exopt, 0, sizeof(*exopt));
 	fin = 0;
@@ -225,12 +226,6 @@ static void parse_option(int argc, char *argv[], struct cmdopts *exopt)
 			case 'i':
 				iface = optarg;
 				nic_check(iface, &ifhead, exopt);
-				if (exopt->ifindex == 0) {
-					fprintf(stderr, "A local nic port must"\
-						       " be specified. '%s' is"\
-							" not valid\n", iface);
-					exit(1);
-				}
 				break;
 			default:
 				assert(0);
@@ -238,13 +233,13 @@ static void parse_option(int argc, char *argv[], struct cmdopts *exopt)
 	}
 	if (exopt->ifindex == 0) {
 		fprintf(stderr, "A local nic port must be specified\n");
-		exit(1);
+		retv = 241;
 	}
 	if (exopt->listen == 0) {
 		if (optind == argc) {
 			fprintf(stderr, "A target mac address must be " \
 					"specified\n");
-			exit(2);
+			retv = 242;
 		}
 		iface = argv[optind];
 		exopt->tarlen = mac2bin(iface, exopt->target,
@@ -252,7 +247,7 @@ static void parse_option(int argc, char *argv[], struct cmdopts *exopt)
 		if (exopt->tarlen == 0) {
 			fprintf(stderr, "target '%s' is not a valid address\n",
 					iface);
-			exit(3);
+			retv = 243;
 		}
 		if (exopt->perftest == 0 && exopt->probe_only == 0)
 			exopt->probe_only = 1;
@@ -283,6 +278,7 @@ static void parse_option(int argc, char *argv[], struct cmdopts *exopt)
 			fprintf(stderr, "Listen mode. Test Length: %d " \
 					"ignored\n", exopt->duration);
 	}
+	return retv;
 }
 
 static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
@@ -581,23 +577,25 @@ next_frame:
 			break;
 		}
 	}
+	munmap(rxr.ring, rxr.size);
 	return retv;
 }
 
 static const char MUMESG[] = "Another instance of linkprobe is active now.\n";
 
-static int check_instance(void)
+static int check_instance(const char *lockfile)
 {
 	static const char self[] = "/proc/self/exe";
 	DIR *proc;
 	struct dirent *dentry;
 	char *exename, *selfname, *procpath;
-	int num;
+	int num, duplicate, fd;
 
+	duplicate = 1;
 	exename = malloc(PATH_MAX*3);
 	if (unlikely(!exename)) {
 		fprintf(stderr, "Out of Memory!\n");
-		exit(ENOMEM);
+		return duplicate;
 	}
 	selfname = exename + PATH_MAX;
 	procpath = selfname + PATH_MAX;
@@ -606,7 +604,7 @@ static int check_instance(void)
 	if (unlikely(!proc)) {
 		fprintf(stderr, "Unable to open directory /proc: %s\n",
 				strerror(errno));
-		exit(250);
+		return duplicate;
 	}
 	num = 0;
 	errno = 0;
@@ -625,7 +623,25 @@ static int check_instance(void)
 				strerror(errno));
 	closedir(proc);
 	free(exename);
-	return num;
+
+	duplicate = num > 1;
+	if (duplicate)
+		return duplicate;
+
+	fd = open(lockfile, O_CREAT|O_EXCL, 0666);
+	if (fd == -1)
+		fprintf(stderr, "Cannot lock file '%s': %s\n", lockfile,
+				strerror(errno));
+	else {
+		duplicate = 0;
+		close(fd);
+	}
+	return duplicate;
+}
+
+static inline void remove_instance_lock(const char *lockfile)
+{
+	unlink(lockfile);
 }
 
 int main(int argc, char *argv[])
@@ -634,22 +650,25 @@ int main(int argc, char *argv[])
 	int dlsock, sysret, retv;
 	struct sockaddr_ll me, peer;
 	struct netcard *nic, *nnic;
+	static const char lockfile[] = "/run/lock/linkprobe";
 
-	if (unlikely(check_instance() != 1)) {
-		fprintf(stderr, MUMESG);
-		return 253;
-	}
 	if (geteuid() != 0) {
 		fprintf(stderr, "Must be root to run linkprobe\n");
 		return 252;
 	}
-	retv = 0;
-	parse_option(argc, argv, &cmdopt);
+	if (unlikely(check_instance(lockfile))) {
+		fprintf(stderr, MUMESG);
+		return 253;
+	}
+	retv = parse_option(argc, argv, &cmdopt);
+	if (retv != 0)
+		goto exit_10;
 	dlsock = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
 	if (unlikely(dlsock == -1)) {
 		fprintf(stderr, "Unable to open AF_PACKET socket: %s\n",
 				strerror(errno));
-		exit(errno);
+		retv = errno;
+		goto exit_10;
 	}
 
 	memset(&me, 0, sizeof(me));
@@ -660,7 +679,8 @@ int main(int argc, char *argv[])
 	if (unlikely(sysret == -1)) {
 		fprintf(stderr, "Cannot bind AF_PACKET socket to local nic: %d\n",
 				cmdopt.ifindex);
-		exit(6);
+		retv = errno;
+		goto exit_20;
 	}
 	install_handler(sig_handler);
 	cmdopt.buf = combuf;
@@ -673,12 +693,15 @@ int main(int argc, char *argv[])
 		retv = do_client(&cmdopt);
 	}
 
-	close(dlsock);
 
+exit_20:
+	close(dlsock);
+exit_10:
 	list_for_each_entry_safe(nic, nnic, &ifhead, lnk) {
 		list_del(&nic->lnk, &ifhead);
 		free(nic);
 	}
+	remove_instance_lock(lockfile);
 	return retv;
 }
 
