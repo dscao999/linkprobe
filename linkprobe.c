@@ -1,3 +1,6 @@
+/*
+ * A Data Link Layer probe and test tool  - dscao999@hotmail.com
+ */
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -921,13 +924,13 @@ static int send_bulk(struct cmdopts *opt)
 		goto exit_20;
 
 	unsigned long total_bytes;
-	unsigned int msecs;
+	unsigned int usecs;
 	double speed;
 
 	res = udp->payload;
 	res = strchr(res, ' ');
-	sscanf(res, "%lu %u", &total_bytes, &msecs);
-	speed = ((double)total_bytes) / (((double)msecs) / 1000000);
+	sscanf(res, "%lu %u", &total_bytes, &usecs);
+	speed = ((double)total_bytes) / (((double)usecs) / 1000000);
 	printf("Speed: %18.2f bytes/s\n", speed);
 
 exit_20:
