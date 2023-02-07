@@ -522,7 +522,6 @@ static int do_server(struct cmdopts *opt)
 			udppkt = udp_payload(pktbuf, pktlen);
 			if (!udppkt)
 				goto next_frame;
-			printf("Packet length: %d, timestamp: %8u - %8u\n", pktlen, pkthdr->tp_sec, pkthdr->tp_usec);
 			if (strncmp(udppkt->payload, PROBE, probelen) == 0) {
 				start_flag = 1;
 				if (strcmp(udppkt->payload, PROBE_ONLY) == 0)
@@ -564,6 +563,19 @@ next_frame:
 			fprintf(stderr, "Abort Receiving Packets: %d. " \
 					"Timeout!\n", retv);
 			retv = 0;
+		}
+		mesg = opt->buf + opt->buflen - 128;
+		len = sprintf(mesg, "%s", END_TEST);
+		sprintf(mesg+len, "%lu %u", st.n, st.tl);
+		len = prepare_udp(opt->buf, opt->buflen - 128, mesg, 0, NULL);
+		sysret = sendto(opt->sock, opt->buf, len, 0,
+				(struct sockaddr *)peer, sizeof(*peer));
+		if (unlikely(sysret == -1)) {
+			if (errno != EINTR)
+				fprintf(stderr, "send to failed: %s\n",
+						strerror(errno));
+			retv = errno;
+			break;
 		}
 	}
 	return retv;
