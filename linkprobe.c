@@ -318,15 +318,15 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 			len = MINI_UDPLEN;
 	} else
 		len = buflen - headlen;
-	udpbuf->udph.uh_sport = sport;
-	udpbuf->udph.uh_dport = dport;
+	udpbuf->udph.source = sport;
+	udpbuf->udph.dest = dport;
 	len += sizeof(struct udphdr);
-	udpbuf->udph.uh_ulen = htons(len);
+	udpbuf->udph.len = htons(len);
 	len += sizeof(*iph);
 	iph->tot_len = htons(len);
 
 	iph->check = htons(iphdr_check(iph));
-	udpbuf->udph.uh_sum = htons(udp_check(iph, &udpbuf->udph));
+	udpbuf->udph.check = htons(udp_check(iph, &udpbuf->udph));
 	if (unlikely(udp_check(iph, &udpbuf->udph) != 0)) {
 		fprintf(stderr, "bad udp checksum at packet no. %lu\n", pkts);
 		fout = fopen("/tmp/packet.dat", "wb");
@@ -375,42 +375,33 @@ static inline unsigned int tm_elapsed(const struct timespec *t0, const struct ti
 static const char Timeout[] = "Abort receiving bulk data! Timeout\n";
 static const char PollFail[] = "Abort receiving bulk data! poll failed: %s\n";
 static const char LinkErr[] = "Abort receiving bulk data! link error\n";
-static int recv_bulk(struct cmdopts *opt, struct statistics *st)
+
+struct rx_ring {
+	char *ring;
+	int size;
+	int strip;
+};
+
+static int recv_bulk(struct cmdopts *opt, struct statistics *st,
+		struct rx_ring *rxr)
 {
-	socklen_t socklen;
 	struct timespec tm0, tm1;
-	int retv, sysret;
+	int retv, sysret, pktlen, stop_flag;
 	struct pollfd pfd;
 	unsigned long count;
 	const struct udp_packet *udppkt;
+	char *curframe, *pktbuf;
+	struct tpacket_hdr *pkthdr;
+	struct sockaddr_ll *fpeer;
 
+	stop_flag = 0;
 	pfd.fd = opt->sock;
 	pfd.events = POLLIN;
 	pfd.revents = 0;
 	retv = 0;
-	sysret = poll(&pfd, 1, 500);
-	if (unlikely(sysret == 0)) {
-		fprintf(stderr, Timeout);
-		return 255;
-	} else if (unlikely(sysret == -1)) {
-		fprintf(stderr, PollFail, strerror(errno));
-		return -errno;
-	} else if ((pfd.revents & POLLIN) == 0) {
-		fprintf(stderr, LinkErr);
-		return -254;
-	}
-	socklen = sizeof(*opt->peer);
-	sysret = recvfrom(opt->sock, opt->buf, opt->buflen, 0,
-			(struct sockaddr *)opt->peer, &socklen);
-	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
-	if (unlikely(sysret == -1)) {
-		if (errno != EINTR)
-			fprintf(stderr, "recvfrom failed: %s\n",
-					strerror(errno));
-		return -errno;
-	}
 	count = 0;
 	st->n = 0;
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
 	do {
 		pfd.revents = 0;
 		sysret = poll(&pfd, 1, 500);
@@ -419,7 +410,8 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st)
 			retv = 255;
 			break;
 		} else if (unlikely(sysret == -1)) {
-			fprintf(stderr, PollFail, strerror(errno));
+			if (errno != EINTR)
+				fprintf(stderr, PollFail, strerror(errno));
 			retv = -errno;
 			break;
 		} else if (unlikely((pfd.revents & POLLIN) == 0)) {
@@ -427,24 +419,32 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st)
 			retv = -254;
 			break;
 		}
-		socklen = sizeof(*opt->peer);
-		sysret = recvfrom(opt->sock, opt->buf, opt->buflen, 0,
-				(struct sockaddr *)opt->peer, &socklen);
-		clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
-		if (unlikely(sysret == -1)) {
-			if (errno != EINTR)
-				fprintf(stderr, "recvfrom failed: %s\n",
-						strerror(errno));
-			retv = -errno;
-			break;
+		for (curframe = rxr->ring; curframe < rxr->ring + rxr->size;
+				curframe += rxr->strip) {
+			pkthdr = (struct tpacket_hdr *)curframe;
+			if ((pkthdr->tp_status & TP_STATUS_USER) == 0)
+				continue;
+			pktlen = pkthdr->tp_len;
+			pktbuf = curframe + pkthdr->tp_net;
+			st->n += pktlen + 18;
+			count += 1;
+			udppkt = udp_payload(pktbuf, pktlen);
+			if (!udppkt)
+				goto next_frame;
+			if (strcmp(udppkt->payload, LAST_PACKET) == 0) {
+				fpeer = (struct sockaddr_ll *)(curframe +
+						TPACKET_ALIGN(sizeof(*pkthdr)));
+				memcpy(opt->peer, fpeer, sizeof(*fpeer));
+				stop_flag = 1;
+			}
+next_frame:
+			asm volatile ("mfence");
+			pkthdr->tp_status = TP_STATUS_KERNEL;
 		}
-		st->n += sysret + 18;
-		count += 1;
-		udppkt = udp_payload(opt->buf, sysret);
-		if (udppkt && strcmp(udppkt->payload, LAST_PACKET) == 0)
-			break;
-	} while (1);
+	} while (stop_flag == 0 && global_exit == 0);
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	st->tl = tm_elapsed(&tm0, &tm1);
+
 	fprintf(stderr, "Received %lu packets, %lu bytes, in %u microseconds\n", count, st->n, st->tl);
 	return retv;
 }
@@ -454,16 +454,14 @@ static int do_client(struct cmdopts *opt);
 
 static int do_server(struct cmdopts *opt)
 {
-	socklen_t socklen;
-	int retv, len, sysret, probe_only, rxsize, probelen;
-	int offset, pktlen, start_flag;
-	unsigned long numpkts;
+	int retv, len, sysret, probe_only, probelen;
+	int pktlen, start_flag;
 	const struct udp_packet *udppkt;
 	struct statistics st;
-	char *mesg, *rxring, *curframe;
+	char *mesg, *curframe;
+	struct rx_ring rxr;
 	const char *pktbuf;
 	struct sockaddr_ll *peer, *fpeer;
-	struct timespec tmnow;
 	struct tpacket_req req_ring;
 	struct pollfd pfd;
 	struct tpacket_hdr *pkthdr;
@@ -471,34 +469,29 @@ static int do_server(struct cmdopts *opt)
 	printf("Listening on ");
 	print_macaddr(opt->me, opt->melen);
 	printf("\n");
-/*	for (i = 0; i < opt->melen - 1; i++, adr++) {
-		printf("%02hhx:", *adr);
-	}
-	printf("%02hhx\n", *adr);*/
 
 	req_ring.tp_block_size = 8192;
 	req_ring.tp_block_nr = 64;
 	req_ring.tp_frame_size = 2048;
 	req_ring.tp_frame_nr = 256;
-	rxsize = req_ring.tp_block_size * req_ring.tp_block_nr;
+	rxr.size = req_ring.tp_block_size * req_ring.tp_block_nr;
 	sysret = setsockopt(opt->sock, SOL_PACKET, PACKET_RX_RING,
 			&req_ring, sizeof(req_ring));
 	if (unlikely(sysret == -1)) {
-		fprintf(stderr, "Cannot get receive buffer: %s\n",
+		fprintf(stderr, "Cannot get receive map buffer: %s\n",
 				strerror(errno));
 		return errno;
 	}
-	rxring = mmap(0, rxsize, PROT_READ|PROT_WRITE, MAP_SHARED,
+	rxr.ring = mmap(0, rxr.size, PROT_READ|PROT_WRITE, MAP_SHARED,
 			opt->sock, 0);
-	if (unlikely(rxring == MAP_FAILED)) {
+	if (unlikely(rxr.ring == MAP_FAILED)) {
 		fprintf(stderr, "Cannot map receiving buffer: %s\n",
 				strerror(errno));
 		return errno;
 	}
-	offset = req_ring.tp_frame_size;
-	curframe = rxring;
-	for (curframe = rxring; curframe < rxring + rxsize;
-			curframe += offset) {
+	rxr.strip = req_ring.tp_frame_size;
+	for (curframe = rxr.ring; curframe < rxr.ring + rxr.size;
+			curframe += rxr.strip) {
 		pkthdr = (struct tpacket_hdr *)curframe;
 		pkthdr->tp_status = TP_STATUS_KERNEL;
 	}
@@ -507,10 +500,10 @@ static int do_server(struct cmdopts *opt)
 	retv = 0;
 	pfd.fd = opt->sock;
 	pfd.events = POLLIN;
-	pfd.revents = 0;
-	while (retv == 0 && global_exit == 0) {
+	while (global_exit == 0) {
 		start_flag = 0;
 		probe_only = 0;
+		pfd.revents = 0;
 		sysret = poll(&pfd, 1, -1);
 		if (sysret == -1) {
 			if (errno != EINTR)
@@ -519,9 +512,8 @@ static int do_server(struct cmdopts *opt)
 			retv = errno;
 			break;
 		}
-		curframe = rxring;
-		for (curframe = rxring; curframe < rxring + rxsize;
-				curframe += offset) {
+		for (curframe = rxr.ring; curframe < rxr.ring + rxr.size;
+				curframe += rxr.strip) {
 			pkthdr = (struct tpacket_hdr *)curframe;
 			if ((pkthdr->tp_status & TP_STATUS_USER) == 0)
 				continue;
@@ -529,27 +521,25 @@ static int do_server(struct cmdopts *opt)
 			pktbuf = curframe + pkthdr->tp_net;
 			udppkt = udp_payload(pktbuf, pktlen);
 			if (!udppkt)
-				continue;
+				goto next_frame;
 			printf("Packet length: %d, timestamp: %8u - %8u\n", pktlen, pkthdr->tp_sec, pkthdr->tp_usec);
 			if (strncmp(udppkt->payload, PROBE, probelen) == 0) {
 				start_flag = 1;
 				if (strcmp(udppkt->payload, PROBE_ONLY) == 0)
 					probe_only = 1;
+				fpeer = (struct sockaddr_ll *)(curframe +
+					TPACKET_ALIGN(sizeof(*pkthdr)));
+				memcpy(peer, fpeer, sizeof(*fpeer));
 			}
-			fpeer = (struct sockaddr_ll *)(curframe +
-				TPACKET_ALIGN(sizeof(struct tpacket_hdr)));
-			memcpy(peer, fpeer, sizeof(*fpeer));
+next_frame:
+			asm volatile ("mfence");
 			pkthdr->tp_status = TP_STATUS_KERNEL;
 		}
 		if (start_flag == 0)
 			continue;
 
-		probe_only = 0;
-		numpkts = 0;
-		st.n = 0;
-		st.tl = 0;
 		mesg = opt->buf + opt->buflen - 64;
-		sprintf(mesg, "%s %ld", PROBE_ACK, tmnow.tv_nsec);
+		sprintf(mesg, "%s %ld", PROBE_ACK, random());
 		len = prepare_udp(opt->buf, opt->buflen - 64, mesg, 0,
 				NULL);
 		sysret = sendto(opt->sock, opt->buf, len, 0,
@@ -564,28 +554,17 @@ static int do_server(struct cmdopts *opt)
 		if (probe_only)
 			continue;
 
-/*			retv = recv_bulk(opt, &st);
-			if (retv > 0)
-				continue;
-			else if (retv < 0) {
-				retv = -retv;
-				break;
-			}
-			mesg = opt->buf + opt->buflen - 128;
-			len = sprintf(mesg, "%s", END_TEST);
-			sprintf(mesg+len, "%lu %u", st.n, st.tl);
-			len = prepare_udp(opt->buf, opt->buflen - 128, mesg, 0,
-					NULL);
-			peer->sll_ifindex = opt->ifindex;
-			sysret = sendto(opt->sock, opt->buf, len, 0,
-					(struct sockaddr *)peer, sizeof(*peer));
-			if (unlikely(sysret == -1)) {
-				if (errno != EINTR)
-					fprintf(stderr, "sendto failed: %s\n",
-							strerror(errno));
-				retv = errno;
-			} */
-
+		st.n = 0;
+		st.tl = 0;
+		retv = recv_bulk(opt, &st, &rxr);
+		if (retv < 0) {
+			retv = -retv;
+			break;
+		} else if (retv > 0) {
+			fprintf(stderr, "Abort Receiving Packets: %d. " \
+					"Timeout!\n", retv);
+			retv = 0;
+		}
 	}
 	return retv;
 }

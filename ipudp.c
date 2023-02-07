@@ -65,9 +65,9 @@ unsigned short udp_check(const struct iphdr *iph,
 	pseudo.daddr = iph->daddr;
 	pseudo.zero = 0;
 	pseudo.proto = iph->protocol;
-	pseudo.udplen = udph->uh_ulen;
+	pseudo.udplen = udph->len;
 	sum = uint16_sum((const char *)&pseudo, sizeof(pseudo));
-	check = checksum((const char *)udph, ntohs(udph->uh_ulen), sum);
+	check = checksum((const char *)udph, ntohs(udph->len), sum);
 	return htons(~check);
 }
 
@@ -99,7 +99,7 @@ const struct udp_packet * udp_payload(const char *l2buf, int len)
 	udph = (const struct udphdr *)(l2buf + iph->ihl*4);
 	ck = udp_check(iph, udph);
 	if (unlikely(ck != 0)) {
-		udplen = ntohs(udph->uh_ulen);
+		udplen = ntohs(udph->len);
 		fprintf(stderr, "UDP checksum error: %04X, udp packet length: %hu\n", ck, udplen);
 		fout = fopen("/tmp/packet.dat", "wb");
 		fwrite(l2buf, 1, len, fout);

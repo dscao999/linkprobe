@@ -38,11 +38,11 @@ int main(int argc, char *argv[])
 	c2 = udp_check(iph, udph);
 	printf("IP Header Checksum: %04hX, UDP Checksum: %04hX\n", c1, c2);
 	printf("IP Header Checksum in packet: %04hX, UDP Checksum in packet: %04hX\n",
-			ntohs(iph->check), ntohs(udph->uh_sum));
+			ntohs(iph->check), ntohs(udph->check));
 
-	printf("IP length: %hd, UDP length: %hd\n", ntohs(iph->tot_len), ntohs(udph->uh_ulen));
+	printf("IP length: %hd, UDP length: %hd\n", ntohs(iph->tot_len), ntohs(udph->len));
 	iph->check = 0;
-	udph->uh_sum = 0;
+	udph->check = 0;
 	c1 = iphdr_check(iph);
 	c2 = udp_check(iph, udph);
 	printf("Calculated IP Header Checksum: %04hX, Calculated UDP checksum: %04hX\n", c1, c2);
