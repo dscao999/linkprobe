@@ -901,6 +901,7 @@ static int send_bulk(struct cmdopts *opt)
 		retv = errno;
 		goto exit_20;
 	}
+	count += 1;
 	opt->duration = tm_elapsed(&tm0, &tm1) / 1000;
 	printf("Total %d packets sent in %d milliseconds\n", count,
 			opt->duration);
