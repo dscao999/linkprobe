@@ -20,6 +20,8 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <limits.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 #include <sys/mman.h>
 #include "enumnet.h"
 #include "ipudp.h"
@@ -71,6 +73,7 @@ struct cmdopts {
 	};
 	int buflen;
 	int sock;
+	int mtu;
 	unsigned short duration;
 	uint16_t ifindex;
 	uint8_t tarlen, melen;
@@ -78,6 +81,29 @@ struct cmdopts {
 	uint8_t probe_only:1;
 	uint8_t perftest:1;
 };
+
+static int getmtu(int sock, int ifindex)
+{
+	struct ifreq mreq;
+	int sysret;
+
+	memset(&mreq, 0, sizeof(mreq));
+	mreq.ifr_ifindex = ifindex;
+	sysret = ioctl(sock, SIOCGIFNAME, &mreq);
+	if (unlikely(sysret == -1)) {
+		fprintf(stderr, "Unable to get ifname of nic %d: %s\n", ifindex,
+				strerror(errno));
+		return 0;
+	}
+	sysret = ioctl(sock, SIOCGIFMTU, &mreq, sizeof(mreq));
+	if (unlikely(sysret == -1)) {
+		fprintf(stderr, "Cannot get MTU of %s: %s\n", mreq.ifr_name,
+				strerror(errno));
+		mreq.ifr_mtu = 0;
+	}
+	printf("%s MTU: %d\n", mreq.ifr_name, mreq.ifr_mtu);
+	return mreq.ifr_mtu;
+}
 
 static void print_macaddr(const unsigned char *mac, int maclen)
 {
@@ -688,6 +714,7 @@ int main(int argc, char *argv[])
 		retv = errno;
 		goto exit_10;
 	}
+	cmdopt.mtu = getmtu(dlsock, cmdopt.ifindex);
 
 	memset(&me, 0, sizeof(me));
 	me.sll_family = AF_PACKET;
