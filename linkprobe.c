@@ -514,10 +514,16 @@ static int do_server(struct cmdopts *opt)
 	print_macaddr(opt->me, opt->melen);
 	printf("\n");
 
-	req_ring.tp_block_size = 8192;
+	probelen = opt->mtu;
+	len = 0;
+	while (probelen) {
+		len += 1;
+		probelen >>= 1;
+	}
+	req_ring.tp_frame_size = (1 << len);
+	req_ring.tp_block_size = req_ring.tp_frame_size * 128;
 	req_ring.tp_block_nr = 64;
-	req_ring.tp_frame_size = 2048;
-	req_ring.tp_frame_nr = 256;
+	req_ring.tp_frame_nr = 64 * 128;
 	rxr.size = req_ring.tp_block_size * req_ring.tp_block_nr;
 	sysret = setsockopt(opt->sock, SOL_PACKET, PACKET_RX_RING,
 			&req_ring, sizeof(req_ring));
