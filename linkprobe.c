@@ -142,6 +142,12 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 			.val = 'a'
 		},
 		{
+			.name = "novary",
+			.has_arg = 1,
+			.flag = NULL,
+			.val = 'o'
+		},
+		{
 			.name = "interface",
 			.has_arg = 1,
 			.flag = NULL,
@@ -184,7 +190,7 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 	fin = 0;
 	opterr = 0;
 	while (fin == 0) {
-		c = getopt_long(argc, argv, ":lpbi:d:a:",
+		c = getopt_long(argc, argv, ":lpbi:d:a:o:",
 				options, NULL);
 		switch(c) {
 			case -1:
@@ -208,6 +214,19 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 					exopt->hdinc.daddr = 1;
 				else if (strcmp(optarg, "saddr") == 0)
 					exopt->hdinc.saddr = 1;
+				else
+					fprintf(stderr, "Invalid variable: " \
+							"%s ignored\n", optarg);
+				break;
+			case 'o':
+				if (strcmp(optarg, "dport") == 0)
+					exopt->hdinc.dport = 0;
+				else if (strcmp(optarg, "sport") == 0)
+					exopt->hdinc.sport = 0;
+				else if (strcmp(optarg, "daddr") == 0)
+					exopt->hdinc.daddr = 0;
+				else if (strcmp(optarg, "saddr") == 0)
+					exopt->hdinc.saddr = 0;
 				else
 					fprintf(stderr, "Invalid variable: " \
 							"%s ignored\n", optarg);
@@ -368,7 +387,7 @@ static inline unsigned int tm_elapsed(const struct timespec *t0, const struct ti
 		elapsed -= 1;
 		nsec += 1000000000l;
 	}
-	return (elapsed*1000000 + nsec / 1000); 
+	return (elapsed*1000000ul + nsec / 1000);
 }
 
 static const char Timeout[] = "Abort receiving bulk data! Timeout\n";
@@ -629,13 +648,12 @@ static int check_instance(const char *lockfile)
 		return duplicate;
 
 	fd = open(lockfile, O_CREAT|O_EXCL, 0666);
-	if (fd == -1)
+	if (fd == -1) {
 		fprintf(stderr, "Cannot lock file '%s': %s\n", lockfile,
 				strerror(errno));
-	else {
-		duplicate = 0;
+		duplicate = 1;
+	} else
 		close(fd);
-	}
 	return duplicate;
 }
 
@@ -783,12 +801,10 @@ static int do_client(struct cmdopts *opt)
 		printf("Link OK: ");
 	else
 		printf("Link Bad: ");
-	printf("%02hhX:%02hhX:%02hhX:%02hhX:%02hhX:%02hhX ---> ", opt->me[0],
-			opt->me[1], opt->me[2], opt->me[3], opt->me[4],
-			opt->me[5]);
-	printf("%02hhX:%02hhX:%02hhX:%02hhX:%02hhX:%02hhX\n", opt->target[0],
-			opt->target[1], opt->target[2], opt->target[3],
-			opt->target[4], opt->target[5]);
+	print_macaddr(opt->me, opt->melen);
+	printf(" ---> ");
+	print_macaddr(opt->target, opt->tarlen);
+	printf("\n");
 	if (retv != 0 || opt->probe_only)
 		return retv;
 
@@ -902,9 +918,8 @@ static int send_bulk(struct cmdopts *opt)
 		goto exit_20;
 	}
 	count += 1;
-	opt->duration = tm_elapsed(&tm0, &tm1) / 1000;
-	printf("Total %d packets sent in %d milliseconds\n", count,
-			opt->duration);
+	rinc = tm_elapsed(&tm0, &tm1) / 1000;
+	printf("Total %d packets sent in %ld milliseconds\n", count, rinc);
 	pfd.fd = opt->sock;
 	pfd.events = POLLIN;
 	pfd.revents = 0;
