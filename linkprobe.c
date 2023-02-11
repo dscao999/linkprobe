@@ -30,6 +30,11 @@
 #define unlikely(x)	__builtin_expect(!!(x), 0)
 #endif
 
+#define	WRITE_ONCE(x, val)						\
+	do {								\
+		*(volatile typeof(x) *)&(x) = (val);			\
+	} while (0)
+
 static volatile int global_exit = 0;
 static volatile int finish_up = 0;
 static void sig_handler(int sig)
@@ -53,7 +58,6 @@ static inline void install_handler(void (*handler)(int))
 }
 
 static struct list_head ifhead = LIST_HEAD_INIT(ifhead);
-static char combuf[1024];
 
 struct header_inc {
 	unsigned char dport:1;
@@ -482,8 +486,7 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 				stop_flag = 1;
 			}
 next_frame:
-			asm volatile ("mfence");
-			pkthdr->tp_status = TP_STATUS_KERNEL;
+			WRITE_ONCE(pkthdr->tp_status, TP_STATUS_KERNEL);
 		}
 	} while (stop_flag == 0 && global_exit == 0);
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
@@ -514,16 +517,10 @@ static int do_server(struct cmdopts *opt)
 	print_macaddr(opt->me, opt->melen);
 	printf("\n");
 
-	probelen = opt->mtu;
-	len = 0;
-	while (probelen) {
-		len += 1;
-		probelen >>= 1;
-	}
-	req_ring.tp_frame_size = (1 << len);
-	req_ring.tp_block_size = req_ring.tp_frame_size * 128;
+	req_ring.tp_frame_size = opt->buflen;
+	req_ring.tp_block_size = req_ring.tp_frame_size * 8;
 	req_ring.tp_block_nr = 64;
-	req_ring.tp_frame_nr = 64 * 128;
+	req_ring.tp_frame_nr = 64 * 8;
 	rxr.size = req_ring.tp_block_size * req_ring.tp_block_nr;
 	sysret = setsockopt(opt->sock, SOL_PACKET, PACKET_RX_RING,
 			&req_ring, sizeof(req_ring));
@@ -581,8 +578,7 @@ static int do_server(struct cmdopts *opt)
 				memcpy(peer, fpeer, sizeof(*fpeer));
 			}
 next_frame:
-			asm volatile ("mfence");
-			pkthdr->tp_status = TP_STATUS_KERNEL;
+			WRITE_ONCE(pkthdr->tp_status, TP_STATUS_KERNEL);
 		}
 		if (start_flag == 0)
 			continue;
@@ -697,7 +693,7 @@ static inline void remove_instance_lock(const char *lockfile)
 int main(int argc, char *argv[])
 {
 	struct cmdopts cmdopt;
-	int dlsock, sysret, retv;
+	int dlsock, sysret, retv, nbits, mtu;
 	struct sockaddr_ll me, peer;
 	struct netcard *nic, *nnic;
 	static const char lockfile[] = "/run/lock/linkprobe";
@@ -721,6 +717,19 @@ int main(int argc, char *argv[])
 		goto exit_10;
 	}
 	cmdopt.mtu = getmtu(dlsock, cmdopt.ifindex);
+	mtu = cmdopt.mtu;
+	nbits = 0;
+	while (mtu) {
+		nbits += 1;
+		mtu >>= 1;
+	}
+	cmdopt.buflen = (1 << nbits);
+	cmdopt.buf = malloc(cmdopt.buflen);
+	if (unlikely(!cmdopt.buf)) {
+		fprintf(stderr, "Out of Memory!\n");
+		retv = ENOMEM;
+		goto exit_20;
+	}
 
 	memset(&me, 0, sizeof(me));
 	me.sll_family = AF_PACKET;
@@ -731,11 +740,9 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "Cannot bind AF_PACKET socket to local nic: %d\n",
 				cmdopt.ifindex);
 		retv = errno;
-		goto exit_20;
+		goto exit_30;
 	}
 	install_handler(sig_handler);
-	cmdopt.buf = combuf;
-	cmdopt.buflen = sizeof(combuf);
 	cmdopt.sock = dlsock;
 	cmdopt.peer = &peer;
 	if (cmdopt.listen) {
@@ -745,6 +752,8 @@ int main(int argc, char *argv[])
 	}
 
 
+exit_30:
+	free(cmdopt.buf);
 exit_20:
 	close(dlsock);
 exit_10:
@@ -927,7 +936,7 @@ static int send_bulk(struct cmdopts *opt)
 			*tmpl += rinc;
 			tmpl += 1;
 		}
-		len = prepare_udp(opt->buf, opt->buflen, NULL, 1, &opt->hdinc);
+		len = prepare_udp(opt->buf, opt->mtu, NULL, 1, &opt->hdinc);
 		sysret = sendto(opt->sock, opt->buf, len, 0,
 				(struct sockaddr *)peer, sizeof(*peer));
 		if (unlikely(sysret == -1)) {
@@ -941,7 +950,7 @@ static int send_bulk(struct cmdopts *opt)
 		count += 1;
 	} while (finish_up == 0 && global_exit == 0 && retv == 0);
 	strcpy(opt->buf+sizeof(struct iphdr)+sizeof(struct udphdr), LAST_PACKET);
-	len = prepare_udp(opt->buf, opt->buflen, NULL, 1, &opt->hdinc);
+	len = prepare_udp(opt->buf, opt->mtu, NULL, 1, &opt->hdinc);
 	sysret = sendto(opt->sock, opt->buf, len, 0, 
 			(struct sockaddr *)peer, sizeof(*peer));
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
