@@ -60,10 +60,10 @@ static inline void install_handler(void (*handler)(int))
 static struct list_head ifhead = LIST_HEAD_INIT(ifhead);
 
 struct header_inc {
-	unsigned char dport:1;
-	unsigned char sport:1;
-	unsigned char daddr:1;
-	unsigned char saddr:1;
+	unsigned int dport:1;
+	unsigned int sport:1;
+	unsigned int daddr:1;
+	unsigned int saddr:1;
 };
 
 struct cmdopts {
@@ -73,7 +73,7 @@ struct cmdopts {
 	unsigned char me[16];
 	union {
 		struct header_inc hdinc;
-		unsigned char hdv;
+		unsigned int hdv;
 	};
 	int buflen;
 	int sock;
