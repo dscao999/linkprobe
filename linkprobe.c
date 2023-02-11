@@ -337,7 +337,7 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 	struct iphdr *iph;
 	struct timespec tm;
 	int len, headlen;
-	static unsigned short dport = 0, sport = 0;
+	static unsigned short dport = 10, sport = 10;
 	static unsigned int saddr = (192 << 24) | (168 << 16) | (117 << 8) | 10;
 	static unsigned int daddr = (192 << 24) | (168 << 16) | (119 << 8) | 10;
 	static unsigned long pkts = 1;
@@ -352,8 +352,8 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 	iph->protocol = 17;
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm);
 	iph->id = tm.tv_nsec & 0x0ffff;
-	iph->saddr = saddr;
-	iph->daddr = daddr;
+	iph->saddr = htonl(saddr);
+	iph->daddr = htonl(daddr);
 	udpbuf = (struct udp_packet *)(buf + iph->ihl*4);
 
 	if (!bulk) {
@@ -366,8 +366,8 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 			len = MINI_UDPLEN;
 	} else
 		len = buflen - headlen;
-	udpbuf->udph.source = sport;
-	udpbuf->udph.dest = dport;
+	udpbuf->udph.source = htons(sport);
+	udpbuf->udph.dest = htons(dport);
 	len += sizeof(struct udphdr);
 	udpbuf->udph.len = htons(len);
 	len += sizeof(*iph);
