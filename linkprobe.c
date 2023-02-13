@@ -78,6 +78,8 @@ struct cmdopts {
 	int buflen;
 	int sock;
 	int mtu;
+	int nrblock;
+	int nrframe;
 	unsigned short duration;
 	uint16_t ifindex;
 	uint8_t tarlen, melen;
@@ -202,6 +204,18 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 			.val = 'd'
 		},
 		{
+			.name = "nrblock",
+			.has_arg = 1,
+			.flag = NULL,
+			.val = 'n'
+		},
+		{
+			.name = "nrframe",
+			.has_arg = 1,
+			.flag = NULL,
+			.val = 'f'
+		},
+		{
 		}
 	};
 	static const unsigned short defdur = 20;
@@ -220,7 +234,7 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 	fin = 0;
 	opterr = 0;
 	while (fin == 0) {
-		c = getopt_long(argc, argv, ":lpbi:d:a:o:",
+		c = getopt_long(argc, argv, ":lpbi:d:a:o:n:f:",
 				options, NULL);
 		switch(c) {
 			case -1:
@@ -234,6 +248,12 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 				fprintf(stderr, "Missing arguments for %c. " \
 						"option ignored\n",
 						(char)(optopt));
+				break;
+			case 'n':
+				exopt->nrblock = atoi(optarg);
+				break;
+			case 'f':
+				exopt->nrframe = atoi(optarg);
 				break;
 			case 'a':
 				if (strcmp(optarg, "dport") == 0)
@@ -280,6 +300,10 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 				assert(0);
 		}
 	}
+	if (exopt->nrblock == 0)
+		exopt->nrblock = 64;
+	if (exopt->nrframe == 0)
+		exopt->nrframe = 8;
 	if (exopt->ifindex == 0) {
 		fprintf(stderr, "A local nic port must be specified\n");
 		retv = 241;
@@ -518,9 +542,9 @@ static int do_server(struct cmdopts *opt)
 	printf("\n");
 
 	req_ring.tp_frame_size = opt->buflen;
-	req_ring.tp_block_size = req_ring.tp_frame_size * 8;
-	req_ring.tp_block_nr = 64;
-	req_ring.tp_frame_nr = 64 * 8;
+	req_ring.tp_block_size = req_ring.tp_frame_size * opt->nrframe;
+	req_ring.tp_block_nr = opt->nrblock;
+	req_ring.tp_frame_nr = opt->nrblock * opt->nrframe;
 	rxr.size = req_ring.tp_block_size * req_ring.tp_block_nr;
 	sysret = setsockopt(opt->sock, SOL_PACKET, PACKET_RX_RING,
 			&req_ring, sizeof(req_ring));
