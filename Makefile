@@ -9,9 +9,9 @@ all: $(ALL)
 
 release: linkprobe capether checksum
 
-release: CFLAGS += -O2 -DNODEBUG
+release: CFLAGS += -O2 -DNODEBUG -flto
 
-release: LDFLAGS += -Wl,-O2
+release: LDFLAGS += -Wl,-O2 -flto
 
 udpcom: udpcom.o
 	$(LINK.o) $^ -o $@
