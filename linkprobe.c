@@ -1022,9 +1022,13 @@ static int send_bulk(struct cmdopts *opt)
 			break;
 		}
 		udp = udp_payload(opt->buf, sysret);
-		if (udp && strncmp(udp->payload, END_TEST, strlen(END_TEST)) == 0)
-			break;
-		printf("W: %s\n", opt->buf+28);
+		if (udp) {
+			if (strncmp(udp->payload, END_TEST, strlen(END_TEST)) == 0)
+				break;
+			printf("Foreign UDP packet. Source port: %hu, Dest " \
+					"port: %hu\n", ntohs(udp->udph.source),
+					ntohs(udp->udph.dest));
+		}
 		count += 1;
 	} while (count < 50 && global_exit == 0);
 	if (retv != 0 || count == 50 || udp == NULL)
