@@ -35,6 +35,8 @@
 		*(volatile typeof(x) *)&(x) = (val);			\
 	} while (0)
 
+#define READ_ONCE(x)	*(volatile typeof(x) *)&(x)
+
 int verbose = 0;
 
 static volatile int global_exit = 0;
@@ -428,8 +430,9 @@ static const char END_TEST[] = "END_OF_TEST ";
 static const char LAST_PACKET[] = "THIS IS THE LAST PACKET";
 
 struct statistics {
-	unsigned long n;
+	unsigned long gn, bn;
 	unsigned int tl;
+	unsigned long gcnt, bcnt;
 };
 
 static inline unsigned int tm_elapsed(const struct timespec *t0, const struct timespec *t1)
@@ -462,7 +465,6 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 	struct timespec tm0, tm1;
 	int retv, sysret, pktlen, stop_flag;
 	struct pollfd pfd;
-	unsigned long count;
 	const struct udp_packet *udppkt;
 	char *curframe, *pktbuf;
 	struct tpacket_hdr *pkthdr;
@@ -473,8 +475,11 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 	pfd.events = POLLIN;
 	pfd.revents = 0;
 	retv = 0;
-	count = 0;
-	st->n = 0;
+	st->gcnt = 0;
+	st->bcnt = 0;
+	st->gn = 0;
+	st->bn = 0;
+	st->tl = 0;
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
 	do {
 		pfd.revents = 0;
@@ -496,15 +501,19 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 		for (curframe = rxr->ring; curframe < rxr->ring + rxr->size;
 				curframe += rxr->strip) {
 			pkthdr = (struct tpacket_hdr *)curframe;
-			if ((pkthdr->tp_status & TP_STATUS_USER) == 0)
+			if ((READ_ONCE(pkthdr->tp_status) & TP_STATUS_USER) == 0)
 				continue;
 			pktlen = pkthdr->tp_len;
 			pktbuf = curframe + pkthdr->tp_net;
-			st->n += pktlen + 18;
-			count += 1;
 			udppkt = udp_payload(pktbuf, pktlen);
-			if (!udppkt)
+			if (unlikely(!udppkt)) {
+				st->bn += pktlen + 18;
+				st->gcnt += 1;
 				goto next_frame;
+			} else {
+				st->gn += pktlen + 18;
+				st->gcnt += 1;
+			}
 			if (strcmp(udppkt->payload, LAST_PACKET) == 0) {
 				fpeer = (struct sockaddr_ll *)(curframe +
 						TPACKET_ALIGN(sizeof(*pkthdr)));
@@ -518,7 +527,9 @@ next_frame:
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	st->tl = tm_elapsed(&tm0, &tm1);
 
-	fprintf(stderr, "Received %lu packets, %lu bytes, in %u microseconds\n", count, st->n, st->tl);
+	printf("Received %lu packets, %lu bytes, in %u microseconds. %lu " \
+			"foreign packets, %lu foreign bytes\n",
+			st->gcnt, st->gn, st->tl, st->bcnt, st->bn);
 	return retv;
 }
 
@@ -625,8 +636,6 @@ next_frame:
 		if (probe_only)
 			continue;
 
-		st.n = 0;
-		st.tl = 0;
 		retv = recv_bulk(opt, &st, &rxr);
 		if (retv < 0) {
 			retv = -retv;
@@ -638,7 +647,7 @@ next_frame:
 		}
 		mesg = opt->buf + opt->buflen - 128;
 		len = sprintf(mesg, "%s", END_TEST);
-		sprintf(mesg+len, "%lu %u", st.n, st.tl);
+		sprintf(mesg+len, "%lu %u", st.gn, st.tl);
 		len = prepare_udp(opt->buf, opt->buflen - 128, mesg, 0, NULL);
 		sysret = sendto(opt->sock, opt->buf, len, 0,
 				(struct sockaddr *)peer, sizeof(*peer));
