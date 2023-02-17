@@ -11,6 +11,11 @@
 #ifndef unlikely
 #define unlikely(x)	__builtin_expect(!!(x), 0)
 #endif
+#ifndef likely
+#define likely(x)	__builtin_expect(!!(x), 1)
+#endif
+
+extern int verbose;
 
 static unsigned long __attribute__((noinline))
 uint16_sum(const char *arr, int len)
@@ -89,6 +94,8 @@ const struct udp_packet * udp_payload(const char *l2buf, int len)
 		return NULL;
 	}
 	if (iph->protocol != 17) {
+		if (likely(verbose < 2))
+			return NULL;
 		clock_gettime(CLOCK_MONOTONIC_COARSE, &tm);
 		snprintf(tmstamp, sizeof(tmstamp), "%10d.%6d", (int)tm.tv_sec,
 				(int)(tm.tv_nsec / 1000));

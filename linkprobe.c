@@ -35,6 +35,8 @@
 		*(volatile typeof(x) *)&(x) = (val);			\
 	} while (0)
 
+int verbose = 0;
+
 static volatile int global_exit = 0;
 static volatile int finish_up = 0;
 static void sig_handler(int sig)

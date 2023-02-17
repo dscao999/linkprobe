@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include "ipudp.h"
 
+int verbose = 0;
 static char buf[2048];
 
 int main(int argc, char *argv[])

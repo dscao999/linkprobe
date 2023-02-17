@@ -12,6 +12,7 @@
 #include "enumnet.h"
 #include "ipudp.h"
 
+int verbose = 0;
 static volatile int global_exit = 0;
 static void sig_handler(int sig)
 {
