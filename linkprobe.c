@@ -307,7 +307,7 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 	if (exopt->nrblock == 0)
 		exopt->nrblock = 64;
 	if (exopt->nrframe == 0)
-		exopt->nrframe = 8;
+		exopt->nrframe = 16;
 	if (exopt->ifindex == 0) {
 		fprintf(stderr, "A local nic port must be specified\n");
 		retv = 241;
