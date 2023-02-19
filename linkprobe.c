@@ -506,6 +506,7 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 				continue;
 			pktlen = pkthdr->tp_len;
 			pktbuf = curframe + pkthdr->tp_net;
+			
 			payload = udp_payload(pktbuf, pktlen);
 			if (unlikely(!payload)) {
 				st->bn += pktlen + 18;
@@ -555,6 +556,7 @@ static int do_server(struct cmdopts *opt)
 	print_macaddr(opt->me, opt->melen);
 	printf("\n");
 
+	memset(&req_ring, 0, sizeof(req_ring));
 	req_ring.tp_frame_size = opt->buflen;
 	req_ring.tp_block_size = req_ring.tp_frame_size * opt->nrframe;
 	req_ring.tp_block_nr = opt->nrblock;
@@ -965,14 +967,17 @@ static int send_bulk(struct cmdopts *opt)
 	}
 	count = 0;
 	finish_up = 0;
+	pkt = (struct ip_packet *)opt->buf;
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
+	pkt->mark = tm0.tv_nsec;
 	do {
 		rinc = random();
-		tmpl = (long *)opt->buf;
+		tmpl = (long *)(pkt->payload);
 		while (tmpl < (long *)(opt->buf+opt->buflen)) {
 			*tmpl += rinc;
 			tmpl += 1;
 		}
+		pkt->seq = count;
 		len = prepare_udp(opt->buf, opt->mtu, NULL, 1, &opt->hdinc);
 		sysret = sendto(opt->sock, opt->buf, len, 0,
 				(struct sockaddr *)peer, sizeof(*peer));
