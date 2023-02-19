@@ -76,10 +76,11 @@ unsigned short udp_check(const struct iphdr *iph,
 	return htons(~check);
 }
 
-const struct udp_packet * udp_payload(const char *l2buf, int len)
+const char * udp_payload(const char *l2buf, int len)
 {
 	const struct iphdr *iph;
 	const struct udphdr *udph;
+	const struct ip_packet *pkt;
 	unsigned short ck, udplen;
 	struct timespec tm;
 	char tmstamp[32];
@@ -87,7 +88,8 @@ const struct udp_packet * udp_payload(const char *l2buf, int len)
 
 	if (l2buf == NULL || len < 28)
 		return NULL;
-	iph = (const struct iphdr *)l2buf;
+	pkt = (const struct ip_packet *)l2buf;
+	iph = &pkt->iph;
 	ck = iphdr_check(iph);
 	if (unlikely(ck != 0)) {
 		fprintf(stderr, "IP Header checksum error: %04X\n", ck);
@@ -103,7 +105,7 @@ const struct udp_packet * udp_payload(const char *l2buf, int len)
 		return NULL;
 	}
 
-	udph = (const struct udphdr *)(l2buf + iph->ihl*4);
+	udph = &pkt->udph;
 	ck = udp_check(iph, udph);
 	if (unlikely(ck != 0)) {
 		udplen = ntohs(udph->len);
@@ -113,5 +115,5 @@ const struct udp_packet * udp_payload(const char *l2buf, int len)
 		fclose(fout);
 		return NULL;
 	}
-	return (const struct udp_packet *)udph;
+	return pkt->payload;
 }

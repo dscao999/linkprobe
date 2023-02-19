@@ -42,7 +42,7 @@ int main(int argc, char *argv[])
 	struct sockaddr_ll me, peer;
 	socklen_t socklen;
 	int dlsock;
-	const struct udp_packet *udppkt;
+	const char *payload;
 
 	retv = 0;
 	if (argc < 2) {
@@ -99,8 +99,8 @@ int main(int argc, char *argv[])
 		printf("One packet received from %02x:%02x:%02x:%02x:%02x:%02x, length: %d\n", peer.sll_addr[0],
 				peer.sll_addr[1], peer.sll_addr[2], peer.sll_addr[3], peer.sll_addr[4], peer.sll_addr[5],
 				sysret);
-		udppkt = udp_payload(combuf, sysret);
-		if (udppkt)
+		payload = udp_payload(combuf, sysret);
+		if (payload)
 			printf("A UDP Packet\n");
 	} while (global_exit == 0);
 

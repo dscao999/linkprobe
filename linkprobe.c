@@ -361,7 +361,7 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 		const struct header_inc *hdinc)
 {
-	struct udp_packet *udpbuf;
+	struct ip_packet *pkt;
 	struct iphdr *iph;
 	struct timespec tm;
 	int len, headlen;
@@ -373,7 +373,8 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 
 	headlen = sizeof(struct iphdr)+sizeof(struct udphdr);
 	memset(buf, 0, headlen);
-	iph = (struct iphdr *)buf;
+	pkt = (struct ip_packet *)buf;
+	iph = &pkt->iph;
 	iph->ihl = 5;
 	iph->version = 4;
 	iph->ttl = 1;
@@ -382,28 +383,28 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 	iph->id = tm.tv_nsec & 0x0ffff;
 	iph->saddr = htonl(saddr);
 	iph->daddr = htonl(daddr);
-	udpbuf = (struct udp_packet *)(buf + iph->ihl*4);
 
+	if (mesg)
+		strcpy(pkt->payload, mesg);
+	else
+		pkt->payload[0] = 0;
 	if (!bulk) {
-		if (mesg)
-			strcpy(udpbuf->payload, mesg);
-		else
-			udpbuf->payload[0] = 0;
-		len = strlen(udpbuf->payload) + 1;
+		len = strlen(pkt->payload) + 1 + sizeof(struct ip_packet) -
+				sizeof(struct iphdr) - sizeof(struct udphdr);
 		if (len < MINI_UDPLEN)
 			len = MINI_UDPLEN;
 	} else
 		len = buflen - headlen;
-	udpbuf->udph.source = htons(sport);
-	udpbuf->udph.dest = htons(dport);
+	pkt->udph.source = htons(sport);
+	pkt->udph.dest = htons(dport);
 	len += sizeof(struct udphdr);
-	udpbuf->udph.len = htons(len);
+	pkt->udph.len = htons(len);
 	len += sizeof(*iph);
 	iph->tot_len = htons(len);
 
 	iph->check = htons(iphdr_check(iph));
-	udpbuf->udph.check = htons(udp_check(iph, &udpbuf->udph));
-	if (unlikely(udp_check(iph, &udpbuf->udph) != 0)) {
+	pkt->udph.check = htons(udp_check(iph, &pkt->udph));
+	if (unlikely(udp_check(iph, &pkt->udph) != 0)) {
 		fprintf(stderr, "bad udp checksum at packet no. %lu\n", pkts);
 		fout = fopen("/tmp/packet.dat", "wb");
 		fwrite(iph, 1, len, fout);
@@ -419,7 +420,7 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 	}
 
 	assert(iphdr_check(iph) == 0);
-	assert(udp_check(iph, &udpbuf->udph) == 0);
+	assert(udp_check(iph, &pkt->udph) == 0);
 	return len;
 }
 
@@ -465,7 +466,7 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 	struct timespec tm0, tm1;
 	int retv, sysret, pktlen, stop_flag;
 	struct pollfd pfd;
-	const struct udp_packet *udppkt;
+	const char *payload;
 	char *curframe, *pktbuf;
 	struct tpacket_hdr *pkthdr;
 	struct sockaddr_ll *fpeer;
@@ -505,8 +506,8 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 				continue;
 			pktlen = pkthdr->tp_len;
 			pktbuf = curframe + pkthdr->tp_net;
-			udppkt = udp_payload(pktbuf, pktlen);
-			if (unlikely(!udppkt)) {
+			payload = udp_payload(pktbuf, pktlen);
+			if (unlikely(!payload)) {
 				st->bn += pktlen + 18;
 				st->gcnt += 1;
 				goto next_frame;
@@ -514,7 +515,7 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 				st->gn += pktlen + 18;
 				st->gcnt += 1;
 			}
-			if (strcmp(udppkt->payload, LAST_PACKET) == 0) {
+			if (strcmp(payload, LAST_PACKET) == 0) {
 				fpeer = (struct sockaddr_ll *)(curframe +
 						TPACKET_ALIGN(sizeof(*pkthdr)));
 				memcpy(opt->peer, fpeer, sizeof(*fpeer));
@@ -540,7 +541,7 @@ static int do_server(struct cmdopts *opt)
 {
 	int retv, len, sysret, probe_only, probelen;
 	int pktlen, start_flag;
-	const struct udp_packet *udppkt;
+	const char *payload;
 	struct statistics st;
 	char *mesg, *curframe;
 	struct rx_ring rxr;
@@ -603,12 +604,12 @@ static int do_server(struct cmdopts *opt)
 				continue;
 			pktlen = pkthdr->tp_len;
 			pktbuf = curframe + pkthdr->tp_net;
-			udppkt = udp_payload(pktbuf, pktlen);
-			if (!udppkt)
+			payload = udp_payload(pktbuf, pktlen);
+			if (!payload)
 				goto next_frame;
-			if (strncmp(udppkt->payload, PROBE, probelen) == 0) {
+			if (strncmp(payload, PROBE, probelen) == 0) {
 				start_flag = 1;
-				if (strcmp(udppkt->payload, PROBE_ONLY) == 0)
+				if (strcmp(payload, PROBE_ONLY) == 0)
 					probe_only = 1;
 				fpeer = (struct sockaddr_ll *)(curframe +
 					TPACKET_ALIGN(sizeof(*pkthdr)));
@@ -803,7 +804,7 @@ exit_10:
 static int do_client(struct cmdopts *opt)
 {
 	struct sockaddr_ll *peer;
-	const struct udp_packet *udp;
+	const char *payload;
 	socklen_t socklen;
 	struct pollfd pfd;
 	int retv, len, sysret, count;
@@ -862,8 +863,8 @@ static int do_client(struct cmdopts *opt)
 			retv = errno;
 			break;
 		}
-		udp = udp_payload(opt->buf, sysret);
-		if (udp && strncmp(udp->payload, PROBE_ACK, strlen(PROBE_ACK))
+		payload = udp_payload(opt->buf, sysret);
+		if (payload && strncmp(payload, PROBE_ACK, strlen(PROBE_ACK))
 				== 0)
 			break;
 		if (opt->probe_only)
@@ -901,10 +902,11 @@ static int send_bulk(struct cmdopts *opt)
 	struct itimerspec itm;
 	struct sockaddr_ll *peer;
 	socklen_t socklen;
-	const struct udp_packet *udp;
+	const char *payload;
 	const char *res;
 	struct timespec tm0, tm1;
 	struct pollfd pfd;
+	struct ip_packet *pkt;
 
 	retv = 0;
 	fin = fopen("/dev/urandom", "rb");
@@ -984,8 +986,7 @@ static int send_bulk(struct cmdopts *opt)
 		}
 		count += 1;
 	} while (finish_up == 0 && global_exit == 0 && retv == 0);
-	strcpy(opt->buf+sizeof(struct iphdr)+sizeof(struct udphdr), LAST_PACKET);
-	len = prepare_udp(opt->buf, opt->mtu, NULL, 1, &opt->hdinc);
+	len = prepare_udp(opt->buf, opt->mtu, LAST_PACKET, 1, &opt->hdinc);
 	sysret = sendto(opt->sock, opt->buf, len, 0, 
 			(struct sockaddr *)peer, sizeof(*peer));
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
@@ -1002,7 +1003,7 @@ static int send_bulk(struct cmdopts *opt)
 	pfd.revents = 0;
 	count = 0;
 	global_exit = 0;
-	udp = NULL;
+	payload = NULL;
 	do {
 		sysret = poll(&pfd, 1, 500);
 		if (unlikely(sysret == 0)) {
@@ -1020,7 +1021,7 @@ static int send_bulk(struct cmdopts *opt)
 			break;
 		}
 		socklen = sizeof(peer);
-		udp = NULL;
+		payload = NULL;
 		sysret = recvfrom(opt->sock, opt->buf, len, 0,
 				(struct sockaddr *)peer, &socklen);
 		if (unlikely(sysret == -1)) {
@@ -1030,24 +1031,25 @@ static int send_bulk(struct cmdopts *opt)
 			retv = errno;
 			break;
 		}
-		udp = udp_payload(opt->buf, sysret);
-		if (udp) {
-			if (strncmp(udp->payload, END_TEST, strlen(END_TEST)) == 0)
+		payload = udp_payload(opt->buf, sysret);
+		if (payload) {
+			pkt = (struct ip_packet *)opt->buf;
+			if (strncmp(payload, END_TEST, strlen(END_TEST)) == 0)
 				break;
 			printf("Foreign UDP packet. Source port: %hu, Dest " \
-					"port: %hu\n", ntohs(udp->udph.source),
-					ntohs(udp->udph.dest));
+					"port: %hu\n", ntohs(pkt->udph.source),
+					ntohs(pkt->udph.dest));
 		}
 		count += 1;
 	} while (count < 50 && global_exit == 0);
-	if (retv != 0 || count == 50 || udp == NULL)
+	if (retv != 0 || count == 50 || payload == NULL)
 		goto exit_20;
 
 	unsigned long total_bytes;
 	unsigned int usecs;
 	double speed;
 
-	res = udp->payload;
+	res = payload;
 	res = strchr(res, ' ');
 	sscanf(res, "%lu %u", &total_bytes, &usecs);
 	speed = ((double)total_bytes) / (((double)usecs) / 1000000);
