@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <limits.h>
+#include <pthread.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <sys/mman.h>
@@ -62,6 +63,15 @@ static inline void install_handler(void (*handler)(int))
 }
 
 static struct list_head ifhead = LIST_HEAD_INIT(ifhead);
+
+struct work_info {
+	int sock;
+	int mtu;
+	volatile double *bandwidth;
+	volatile int *stop;
+	pthread_t thid;
+	volatile int running;
+};
 
 struct header_inc {
 	unsigned int dport:1;
@@ -497,6 +507,67 @@ static int check_ring(struct cmdopts *opt, struct statistics *st,
 	return stop_flag;
 }
 
+static void *receive_drain(void *arg)
+{
+	struct work_info *wrkinf = (struct work_info *)arg;
+	struct pollfd pfd;
+	int sysret, buflen;
+	struct sockaddr_ll peer;
+	socklen_t socklen;
+	const char *payload, *res;
+	char *buf;
+	unsigned long total_bytes;
+	unsigned int usecs;
+	struct ip_packet *pkt;
+
+	wrkinf->running = 1;
+	buflen = wrkinf->mtu;
+	buf = malloc(buflen);
+	if (!buf) {
+		fprintf(stderr, "Out of Memory!");
+		return NULL;
+	}
+	pkt = (struct ip_packet *)buf;
+	pfd.fd = wrkinf->sock;
+	pfd.events = POLLIN;
+	payload = NULL;
+	do {
+		pfd.revents = 0;
+		sysret = poll(&pfd, 1, 100);
+		if (*wrkinf->stop != 0 || sysret == 0)
+			continue;
+		if (sysret == -1) {
+			if (errno != EINTR)
+				fprintf(stderr, "socket poll failed: %s\n",
+						strerror(errno));
+			break;
+		}
+		payload = NULL;
+		socklen = sizeof(peer);
+		sysret = recvfrom(wrkinf->sock, buf, buflen, 0,
+				(struct sockaddr *)&peer, &socklen);
+		if (sysret == -1) {
+			if (errno != EINTR)
+				fprintf(stderr, "recvfrom failed: %s\n",
+						strerror(errno));
+			break;
+		}
+		payload = udp_payload(buf, sysret);
+		if(payload)
+			printf("Foreign UDP packet. Source port: %hu, Dest " \
+					"port: %hu\n", ntohs(pkt->udph.source),
+					ntohs(pkt->udph.dest));
+	} while (*wrkinf->stop == 0 && global_exit == 0);
+	if (payload && strncmp(payload, END_TEST, strlen(END_TEST)) == 0) {
+		res = strchr(payload, ' ');
+		sscanf(res, "%lu %u", &total_bytes, &usecs);
+		*wrkinf->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
+	}
+	free(buf);
+	wrkinf->running = 0;
+	return NULL;
+}
+
 static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 		struct rx_ring *rxr, int mark_value)
 {
@@ -923,7 +994,10 @@ static int send_bulk(struct cmdopts *opt, int mark_value)
 	struct timespec tm0, tm1;
 	struct pollfd pfd;
 	struct ip_packet *pkt;
+	struct work_info wrkinf;
+	volatile double speed;
 
+	speed = -1.0;
 	retv = 0;
 	fin = fopen("/dev/urandom", "rb");
 	if (unlikely(!fin)) {
@@ -972,19 +1046,28 @@ static int send_bulk(struct cmdopts *opt, int mark_value)
 		retv = errno;
 		goto exit_10;
 	}
+	finish_up = 0;
+	wrkinf.sock = opt->sock;
+	wrkinf.stop = &finish_up;
+	wrkinf.mtu = opt->mtu;
+	wrkinf.running = -1;
+	wrkinf.bandwidth = &speed;
+	sysret = pthread_create(&wrkinf.thid, NULL, receive_drain, &wrkinf);
+	if (unlikely(sysret != 0))
+		fprintf(stderr, "Warning! Cannot create drain thread: %s\n",
+			strerror(sysret));
+	count = 0;
+	pkt = (struct ip_packet *)opt->buf;
+	pkt->mark = mark_value;
 	memset(&itm, 0, sizeof(itm));
 	itm.it_value.tv_sec = opt->duration;
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
 	sysret = timer_settime(tmid, 0, &itm, NULL);
 	if (unlikely(sysret == -1)) {
 		fprintf(stderr, "Cannot set timer: %s\n", strerror(errno));
 		retv = errno;
 		goto exit_20;
 	}
-	count = 0;
-	finish_up = 0;
-	pkt = (struct ip_packet *)opt->buf;
-	pkt->mark = mark_value;
-	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
 	do {
 		rinc = random();
 		tmpl = (long *)(pkt->payload);
@@ -1024,6 +1107,10 @@ static int send_bulk(struct cmdopts *opt, int mark_value)
 	count = 0;
 	global_exit = 0;
 	payload = NULL;
+	if (wrkinf.running != -1)
+		pthread_join(wrkinf.thid, NULL);
+	if (speed != -1.0)
+		goto exit_30;
 	do {
 		sysret = poll(&pfd, 1, 500);
 		if (unlikely(sysret == 0)) {
@@ -1067,12 +1154,13 @@ static int send_bulk(struct cmdopts *opt, int mark_value)
 
 	unsigned long total_bytes;
 	unsigned int usecs;
-	double speed;
 
 	res = payload;
 	res = strchr(res, ' ');
 	sscanf(res, "%lu %u", &total_bytes, &usecs);
 	speed = ((double)total_bytes) / (((double)usecs) / 1000000);
+
+exit_30:
 	printf("Speed: %18.2f bytes/s\n", speed);
 
 exit_20:

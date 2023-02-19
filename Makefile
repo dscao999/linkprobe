@@ -1,5 +1,5 @@
-CFLAGS = -Wall -g -D_GNU_SOURCE
-LDFLAGS = 
+CFLAGS = -Wall -g -D_GNU_SOURCE -pthread
+LDFLAGS = -pthread
 
 .PHONY:	clean all release
 
