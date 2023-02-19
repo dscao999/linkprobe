@@ -460,16 +460,50 @@ struct rx_ring {
 	int strip;
 };
 
+static int check_ring(struct cmdopts *opt, struct statistics *st,
+		struct rx_ring *rxr, int mark_value) {
+	char *curframe, *pktbuf;
+	struct tpacket_hdr *pkthdr;
+	struct sockaddr_ll *fpeer;
+	int pktlen, stop_flag;
+	const char *payload;
+
+	stop_flag = 0;
+	for (curframe = rxr->ring; curframe < rxr->ring + rxr->size;
+			curframe += rxr->strip) {
+		pkthdr = (struct tpacket_hdr *)curframe;
+		if ((READ_ONCE(pkthdr->tp_status) & TP_STATUS_USER) == 0)
+			continue;
+		pktlen = pkthdr->tp_len;
+		pktbuf = curframe + pkthdr->tp_net;
+		
+		payload = udp_payload(pktbuf, pktlen);
+		if (unlikely(!payload)) {
+			st->bn += pktlen + 18;
+			st->gcnt += 1;
+			goto next_frame;
+		} else {
+			st->gn += pktlen + 18;
+			st->gcnt += 1;
+		}
+		if (strcmp(payload, LAST_PACKET) == 0) {
+			fpeer = (struct sockaddr_ll *)(curframe +
+					TPACKET_ALIGN(sizeof(*pkthdr)));
+			memcpy(opt->peer, fpeer, sizeof(*fpeer));
+			stop_flag = 1;
+		}
+next_frame:
+		WRITE_ONCE(pkthdr->tp_status, TP_STATUS_KERNEL);
+	}
+	return stop_flag;
+}
+
 static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 		struct rx_ring *rxr, int mark_value)
 {
 	struct timespec tm0, tm1;
-	int retv, sysret, pktlen, stop_flag;
+	int retv, sysret, stop_flag;
 	struct pollfd pfd;
-	const char *payload;
-	char *curframe, *pktbuf;
-	struct tpacket_hdr *pkthdr;
-	struct sockaddr_ll *fpeer;
 
 	stop_flag = 0;
 	pfd.fd = opt->sock;
@@ -499,32 +533,7 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 			retv = -254;
 			break;
 		}
-		for (curframe = rxr->ring; curframe < rxr->ring + rxr->size;
-				curframe += rxr->strip) {
-			pkthdr = (struct tpacket_hdr *)curframe;
-			if ((READ_ONCE(pkthdr->tp_status) & TP_STATUS_USER) == 0)
-				continue;
-			pktlen = pkthdr->tp_len;
-			pktbuf = curframe + pkthdr->tp_net;
-			
-			payload = udp_payload(pktbuf, pktlen);
-			if (unlikely(!payload)) {
-				st->bn += pktlen + 18;
-				st->gcnt += 1;
-				goto next_frame;
-			} else {
-				st->gn += pktlen + 18;
-				st->gcnt += 1;
-			}
-			if (strcmp(payload, LAST_PACKET) == 0) {
-				fpeer = (struct sockaddr_ll *)(curframe +
-						TPACKET_ALIGN(sizeof(*pkthdr)));
-				memcpy(opt->peer, fpeer, sizeof(*fpeer));
-				stop_flag = 1;
-			}
-next_frame:
-			WRITE_ONCE(pkthdr->tp_status, TP_STATUS_KERNEL);
-		}
+		stop_flag = check_ring(opt, st, rxr, mark_value);
 	} while (stop_flag == 0 && global_exit == 0);
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	st->tl = tm_elapsed(&tm0, &tm1);
