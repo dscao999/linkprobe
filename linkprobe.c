@@ -467,6 +467,7 @@ static int check_ring(struct cmdopts *opt, struct statistics *st,
 	struct sockaddr_ll *fpeer;
 	int pktlen, stop_flag;
 	const char *payload;
+	struct ip_packet *ippkt;
 
 	stop_flag = 0;
 	for (curframe = rxr->ring; curframe < rxr->ring + rxr->size;
@@ -476,23 +477,21 @@ static int check_ring(struct cmdopts *opt, struct statistics *st,
 			continue;
 		pktlen = pkthdr->tp_len;
 		pktbuf = curframe + pkthdr->tp_net;
-		
+		ippkt = (struct ip_packet *)pktbuf;
 		payload = udp_payload(pktbuf, pktlen);
-		if (unlikely(!payload)) {
+		if (unlikely(!payload||ntohl(ippkt->mark) != mark_value)) {
 			st->bn += pktlen + 18;
-			st->gcnt += 1;
-			goto next_frame;
+			st->bcnt += 1;
 		} else {
 			st->gn += pktlen + 18;
 			st->gcnt += 1;
+			if (strcmp(payload, LAST_PACKET) == 0) {
+				fpeer = (struct sockaddr_ll *)(curframe +
+						TPACKET_ALIGN(sizeof(*pkthdr)));
+				memcpy(opt->peer, fpeer, sizeof(*fpeer));
+				stop_flag = 1;
+			}
 		}
-		if (strcmp(payload, LAST_PACKET) == 0) {
-			fpeer = (struct sockaddr_ll *)(curframe +
-					TPACKET_ALIGN(sizeof(*pkthdr)));
-			memcpy(opt->peer, fpeer, sizeof(*fpeer));
-			stop_flag = 1;
-		}
-next_frame:
 		WRITE_ONCE(pkthdr->tp_status, TP_STATUS_KERNEL);
 	}
 	return stop_flag;
@@ -544,7 +543,7 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 	return retv;
 }
 
-static int send_bulk(struct cmdopts *opt);
+static int send_bulk(struct cmdopts *opt, int mark_value);
 static int do_client(struct cmdopts *opt);
 
 static int do_server(struct cmdopts *opt)
@@ -823,7 +822,7 @@ static int do_client(struct cmdopts *opt)
 	const char *payload;
 	socklen_t socklen;
 	struct pollfd pfd;
-	int retv, len, sysret, count;
+	int retv, len, sysret, count, mark_value;
 	char *mesg;
 	struct timespec tm;
 
@@ -836,12 +835,13 @@ static int do_client(struct cmdopts *opt)
 	peer->sll_protocol = htons(ETH_P_IP);
 
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm);
+	mark_value = tm.tv_nsec;
 	mesg = opt->buf + opt->buflen - 128;
 	count = 0;
 	if (opt->probe_only)
 		sprintf(mesg, "%s", PROBE_ONLY);
 	else
-		sprintf(mesg, "%s %d", PROBE, (int)tm.tv_nsec);
+		sprintf(mesg, "%s %d", PROBE, mark_value);
 	len = prepare_udp(opt->buf, opt->mtu - 128, mesg, 0, NULL);
 	do {
 		peer->sll_halen = opt->tarlen;
@@ -902,12 +902,12 @@ static int do_client(struct cmdopts *opt)
 	if (retv != 0 || opt->probe_only)
 		return retv;
 
-	retv = send_bulk(opt);
+	retv = send_bulk(opt, mark_value);
 
 	return retv;
 }
 
-static int send_bulk(struct cmdopts *opt)
+static int send_bulk(struct cmdopts *opt, int mark_value)
 {
 	int retv, buflen, off, len, sysret, count;
 	FILE *fin;
@@ -947,6 +947,7 @@ static int send_bulk(struct cmdopts *opt)
 	} while (buflen > 0);
 	fclose(fin);
 
+	mark_value = htonl(mark_value);
 	peer = opt->peer;
 	memset(peer, 0, sizeof(*peer));
 	peer->sll_family = AF_PACKET;
@@ -982,8 +983,8 @@ static int send_bulk(struct cmdopts *opt)
 	count = 0;
 	finish_up = 0;
 	pkt = (struct ip_packet *)opt->buf;
+	pkt->mark = mark_value;
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
-	pkt->mark = tm0.tv_nsec;
 	do {
 		rinc = random();
 		tmpl = (long *)(pkt->payload);
