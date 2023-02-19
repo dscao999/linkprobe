@@ -461,7 +461,7 @@ struct rx_ring {
 };
 
 static int recv_bulk(struct cmdopts *opt, struct statistics *st,
-		struct rx_ring *rxr)
+		struct rx_ring *rxr, int mark_value)
 {
 	struct timespec tm0, tm1;
 	int retv, sysret, pktlen, stop_flag;
@@ -541,8 +541,8 @@ static int do_client(struct cmdopts *opt);
 static int do_server(struct cmdopts *opt)
 {
 	int retv, len, sysret, probe_only, probelen;
-	int pktlen, start_flag;
-	const char *payload;
+	int pktlen, start_flag, mark_value;
+	const char *payload, *mark;
 	struct statistics st;
 	char *mesg, *curframe;
 	struct rx_ring rxr;
@@ -588,6 +588,7 @@ static int do_server(struct cmdopts *opt)
 	pfd.fd = opt->sock;
 	pfd.events = POLLIN;
 	while (global_exit == 0) {
+		mark_value = -1;
 		start_flag = 0;
 		probe_only = 0;
 		pfd.revents = 0;
@@ -613,6 +614,10 @@ static int do_server(struct cmdopts *opt)
 				start_flag = 1;
 				if (strcmp(payload, PROBE_ONLY) == 0)
 					probe_only = 1;
+				else {
+					mark = strrchr(payload, ' ');
+					mark_value = atoi(mark);
+				}
 				fpeer = (struct sockaddr_ll *)(curframe +
 					TPACKET_ALIGN(sizeof(*pkthdr)));
 				memcpy(peer, fpeer, sizeof(*fpeer));
@@ -639,7 +644,7 @@ next_frame:
 		if (probe_only)
 			continue;
 
-		retv = recv_bulk(opt, &st, &rxr);
+		retv = recv_bulk(opt, &st, &rxr, mark_value);
 		if (retv < 0) {
 			retv = -retv;
 			break;
@@ -810,6 +815,8 @@ static int do_client(struct cmdopts *opt)
 	socklen_t socklen;
 	struct pollfd pfd;
 	int retv, len, sysret, count;
+	char *mesg;
+	struct timespec tm;
 
 	retv = 0;
 	pfd.fd = opt->sock;
@@ -819,11 +826,14 @@ static int do_client(struct cmdopts *opt)
 	peer->sll_family = AF_PACKET;
 	peer->sll_protocol = htons(ETH_P_IP);
 
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm);
+	mesg = opt->buf + opt->buflen - 128;
 	count = 0;
 	if (opt->probe_only)
-		len = prepare_udp(opt->buf, opt->buflen, PROBE_ONLY, 0, NULL);
+		sprintf(mesg, "%s", PROBE_ONLY);
 	else
-		len = prepare_udp(opt->buf, opt->buflen, PROBE, 0, NULL);
+		sprintf(mesg, "%s %d", PROBE, (int)tm.tv_nsec);
+	len = prepare_udp(opt->buf, opt->mtu - 128, mesg, 0, NULL);
 	do {
 		peer->sll_halen = opt->tarlen;
 		memcpy(peer->sll_addr, opt->target, opt->tarlen);
@@ -869,12 +879,7 @@ static int do_client(struct cmdopts *opt)
 		if (payload && strncmp(payload, PROBE_ACK, strlen(PROBE_ACK))
 				== 0)
 			break;
-		if (opt->probe_only)
-			len = prepare_udp(opt->buf, opt->buflen, PROBE_ONLY, 0,
-					NULL);
-		else
-			len = prepare_udp(opt->buf, opt->buflen, PROBE, 0,
-					NULL);
+		len = prepare_udp(opt->buf, opt->mtu - 128, mesg, 0, NULL);
 		count += 1;
 	} while (global_exit == 0 && retv == 0 && count < 50);
 	if (retv == 0 && count < 50)
