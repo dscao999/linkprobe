@@ -695,9 +695,21 @@ static int init_sock(struct work_info *winf, int rx)
 		pkthdr = (struct tpacket_hdr *)curframe;
 		pkthdr->tp_status = TP_STATUS_KERNEL;
 	}
+	int fanout_arg;
+
+	fanout_arg = (winf->pid & 0x0ffff) | (PACKET_FANOUT_LB << 16);
+	sysret = setsockopt(dlsock, SOL_PACKET, PACKET_FANOUT, 
+			&fanout_arg, sizeof(fanout_arg));
+	if (unlikely(sysret == -1)) {
+		fprintf(stderr, "setsockopt for fanout failed: %s\n",
+				strerror(errno));
+		goto err_exit_20;
+	}
 
 	return dlsock;
 
+err_exit_20:
+	munmap(rxr->ring, rxr->size);
 err_exit_10:
 	close(dlsock);
 	return retv;
