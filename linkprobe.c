@@ -589,7 +589,6 @@ static int recv_bulk(struct work_info *winf)
 	struct statistics *st = &winf->st;
 	struct rx_ring *rxr = &winf->rxr;
 
-	stop_flag = 0;
 	pfd.fd = winf->sock;
 	pfd.events = POLLIN;
 	pfd.revents = 0;
@@ -618,7 +617,12 @@ static int recv_bulk(struct work_info *winf)
 			break;
 		}
 		stop_flag = check_ring(opt, st, rxr, winf->mark_value);
-	} while (stop_flag == 0 && global_exit == 0);
+	} while (stop_flag == 0 && global_exit == 0 && *winf->stop == 0);
+	*winf->stop = 1;
+	pfd.revents = 0;
+	sysret = poll(&pfd, 1, 100);
+	if (sysret > 0)
+		check_ring(opt, st, rxr, winf->mark_value);
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	st->tl = tm_elapsed(&tm0, &tm1);
 
@@ -706,10 +710,20 @@ static inline void close_sock(struct work_info *winf)
 	close(winf->sock);
 }
 
+static void * recv_horse(void *arg)
+{
+	struct work_info *winf = arg;
+	int retv;
+
+	winf->running = 1;
+	retv = recv_bulk(winf);
+	*winf->stop = 1;
+	return (void *)((long)retv);
+}
+
 static int do_server(struct work_info *winf)
 {
 	int retv, len, sysret, probe_only, probelen;
-	int mark_value;
 	const char *payload, *mark;
 	char *mesg;
 	struct sockaddr_ll peer;
@@ -723,8 +737,8 @@ static int do_server(struct work_info *winf)
 	mesg = winf->buf + winf->buflen;
 	probelen = strlen(PROBE);
 	retv = 0;
+	winf->mark_value = -1;
 	while (global_exit == 0) {
-		mark_value = -1;
 		probe_only = 0;
 		socklen = sizeof(peer);
 		sysret = recvfrom(winf->sock, winf->buf, winf->buflen, 0,
@@ -761,12 +775,23 @@ static int do_server(struct work_info *winf)
 			continue;
 
 		close_sock(winf);
-		winf->sock = init_sock(winf, 1);
-		if (winf->sock < 0) {
-			retv = winf->sock;
-			break;
+
+		volatile int stop = 0;
+		struct work_info wrk[1];
+		void *thres;
+
+		wrk[0] = *winf;
+		wrk[0].stop = &stop;
+		wrk[0].sock = init_sock(wrk, 1);
+		if (wrk[0].sock < 0)
+			assert(0);
+		sysret = pthread_create(&wrk[0].thid, NULL, recv_horse, wrk+0);
+		if (unlikely(sysret != 0)) {
+			fprintf(stderr, "Cannot create thread: %s\n", strerror(sysret));
+			assert(0);
 		}
-		retv = recv_bulk(winf);
+		pthread_join(wrk[0].thid, &thres);
+		retv = (int)(long)thres;
 		if (retv > 0) {
 			fprintf(stderr, "Abort Receiving Packets: %d. " \
 					"Timeout!\n", retv);
@@ -774,10 +799,10 @@ static int do_server(struct work_info *winf)
 		}
 		mesg = winf->buf + winf->buflen;
 		len = sprintf(mesg, "%s", END_TEST);
-		sprintf(mesg+len, "%lu %u", winf->st.gn, winf->st.tl);
-		((struct ip_packet *)winf->buf)->mark = htonl(mark_value);
+		sprintf(mesg+len, "%lu %u", wrk[0].st.gn, wrk[0].st.tl);
+		((struct ip_packet *)winf->buf)->mark = htonl(winf->mark_value);
 		len = prepare_udp(winf->buf, winf->mtu, mesg, 0, NULL);
-		sysret = sendto(winf->sock, winf->buf, len, 0,
+		sysret = sendto(wrk[0].sock, winf->buf, len, 0,
 				(struct sockaddr *)&peer, sizeof(peer));
 		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
@@ -786,7 +811,7 @@ static int do_server(struct work_info *winf)
 			retv = -errno;
 			break;
 		}
-		close_sock(winf);
+		close_sock(wrk);
 		winf->sock = init_sock(winf, 0);
 		if (unlikely(winf->sock < 0))
 			break;
