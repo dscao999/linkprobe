@@ -580,7 +580,7 @@ static void *receive_drain(void *arg)
 	return (void *)((long)retv);
 }
 
-static int recv_bulk(struct work_info *winf, int mark_value)
+static int recv_bulk(struct work_info *winf)
 {
 	struct timespec tm0, tm1;
 	int retv, sysret, stop_flag;
@@ -617,7 +617,7 @@ static int recv_bulk(struct work_info *winf, int mark_value)
 			retv = -254;
 			break;
 		}
-		stop_flag = check_ring(opt, st, rxr, mark_value);
+		stop_flag = check_ring(opt, st, rxr, winf->mark_value);
 	} while (stop_flag == 0 && global_exit == 0);
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	st->tl = tm_elapsed(&tm0, &tm1);
@@ -743,7 +743,7 @@ static int do_server(struct work_info *winf)
 			probe_only = 1;
 		else {
 			mark = strrchr(payload, ' ');
-			mark_value = atoi(mark);
+			winf->mark_value = atoi(mark);
 		}
 
 		sprintf(mesg, "%s %ld", PROBE_ACK, random());
@@ -766,7 +766,7 @@ static int do_server(struct work_info *winf)
 			retv = winf->sock;
 			break;
 		}
-		retv = recv_bulk(winf, mark_value);
+		retv = recv_bulk(winf);
 		if (retv > 0) {
 			fprintf(stderr, "Abort Receiving Packets: %d. " \
 					"Timeout!\n", retv);
