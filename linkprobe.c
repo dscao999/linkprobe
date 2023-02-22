@@ -62,15 +62,16 @@ static inline void install_handler(void (*handler)(int))
 				strerror(errno));
 }
 
-static struct list_head ifhead = LIST_HEAD_INIT(ifhead);
+struct statistics {
+	unsigned long gn, bn;
+	unsigned int tl;
+	unsigned long gcnt, bcnt;
+};
 
-struct work_info {
-	int sock;
-	int mtu;
-	volatile double *bandwidth;
-	volatile int *stop;
-	pthread_t thid;
-	volatile int running;
+struct rx_ring {
+	char *ring;
+	int size;
+	int strip;
 };
 
 struct header_inc {
@@ -81,17 +82,12 @@ struct header_inc {
 };
 
 struct cmdopts {
-	struct sockaddr_ll *peer;
-	char *buf;
 	unsigned char target[16];
 	unsigned char me[16];
 	union {
 		struct header_inc hdinc;
 		unsigned int hdv;
 	};
-	int buflen;
-	int sock;
-	int mtu;
 	int nrblock;
 	int nrframe;
 	unsigned short duration;
@@ -102,18 +98,44 @@ struct cmdopts {
 	uint8_t perftest:1;
 };
 
-static int getmtu(int sock, int ifindex)
+
+static struct list_head ifhead = LIST_HEAD_INIT(ifhead);
+
+struct work_info {
+	pthread_t thid;
+	pid_t pid;
+	int mtu, mark_value;
+	volatile double *bandwidth;
+	int buflen;
+	int sock;
+	volatile int running;
+	volatile int *stop;
+	const struct cmdopts *opt;
+	char *buf;
+	struct rx_ring rxr;
+	struct statistics st;
+};
+
+static int getmtu(int ifindex)
 {
 	struct ifreq mreq;
-	int sysret;
+	int sysret, sock, mtu;
 
+	mtu = 0;
+	sock = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
+	if (unlikely(sock == -1)) {
+		fprintf(stderr, "Unable to open AF_PACKET socket: %s\n",
+				strerror(errno));
+		fprintf(stderr, "Cannot get MTU\n");
+		return mtu;
+	}
 	memset(&mreq, 0, sizeof(mreq));
 	mreq.ifr_ifindex = ifindex;
 	sysret = ioctl(sock, SIOCGIFNAME, &mreq);
 	if (unlikely(sysret == -1)) {
 		fprintf(stderr, "Unable to get ifname of nic %d: %s\n", ifindex,
 				strerror(errno));
-		return 0;
+		goto exit_10;
 	}
 	sysret = ioctl(sock, SIOCGIFMTU, &mreq, sizeof(mreq));
 	if (unlikely(sysret == -1)) {
@@ -122,7 +144,11 @@ static int getmtu(int sock, int ifindex)
 		mreq.ifr_mtu = 0;
 	}
 	printf("%s MTU: %d\n", mreq.ifr_name, mreq.ifr_mtu);
-	return mreq.ifr_mtu;
+	mtu = mreq.ifr_mtu;
+
+exit_10:
+	close(sock);
+	return mtu;
 }
 
 static void print_macaddr(const unsigned char *mac, int maclen)
@@ -440,12 +466,6 @@ static const char PROBE_ACK[] = "LINK PROBED OK";
 static const char END_TEST[] = "END_OF_TEST ";
 static const char LAST_PACKET[] = "THIS IS THE LAST PACKET";
 
-struct statistics {
-	unsigned long gn, bn;
-	unsigned int tl;
-	unsigned long gcnt, bcnt;
-};
-
 static inline unsigned int tm_elapsed(const struct timespec *t0, const struct timespec *t1)
 {
 	unsigned int elapsed;
@@ -464,17 +484,10 @@ static const char Timeout[] = "Abort receiving bulk data! Timeout\n";
 static const char PollFail[] = "Abort receiving bulk data! poll failed: %s\n";
 static const char LinkErr[] = "Abort receiving bulk data! link error\n";
 
-struct rx_ring {
-	char *ring;
-	int size;
-	int strip;
-};
-
-static int check_ring(struct cmdopts *opt, struct statistics *st,
+static int check_ring(const struct cmdopts *opt, struct statistics *st,
 		struct rx_ring *rxr, int mark_value) {
 	char *curframe, *pktbuf;
 	struct tpacket_hdr *pkthdr;
-	struct sockaddr_ll *fpeer;
 	int pktlen, stop_flag;
 	const char *payload;
 	struct ip_packet *ippkt;
@@ -495,12 +508,8 @@ static int check_ring(struct cmdopts *opt, struct statistics *st,
 		} else {
 			st->gn += pktlen + 18;
 			st->gcnt += 1;
-			if (strcmp(payload, LAST_PACKET) == 0) {
-				fpeer = (struct sockaddr_ll *)(curframe +
-						TPACKET_ALIGN(sizeof(*pkthdr)));
-				memcpy(opt->peer, fpeer, sizeof(*fpeer));
+			if (strcmp(payload, LAST_PACKET) == 0)
 				stop_flag = 1;
-			}
 		}
 		WRITE_ONCE(pkthdr->tp_status, TP_STATUS_KERNEL);
 	}
@@ -511,17 +520,16 @@ static void *receive_drain(void *arg)
 {
 	struct work_info *wrkinf = (struct work_info *)arg;
 	struct pollfd pfd;
-	int sysret, buflen;
-	struct sockaddr_ll peer;
-	socklen_t socklen;
+	int sysret, buflen, retv;
 	const char *payload, *res;
 	char *buf;
 	unsigned long total_bytes;
 	unsigned int usecs;
 	struct ip_packet *pkt;
 
+	retv = 0;
 	wrkinf->running = 1;
-	buflen = wrkinf->mtu;
+	buflen = wrkinf->buflen;
 	buf = malloc(buflen);
 	if (!buf) {
 		fprintf(stderr, "Out of Memory!");
@@ -533,50 +541,56 @@ static void *receive_drain(void *arg)
 	payload = NULL;
 	do {
 		pfd.revents = 0;
-		sysret = poll(&pfd, 1, 100);
-		if (*wrkinf->stop != 0 || sysret == 0)
+		sysret = poll(&pfd, 1, 200);
+		if (sysret == 0)
 			continue;
 		if (sysret == -1) {
 			if (errno != EINTR)
 				fprintf(stderr, "socket poll failed: %s\n",
 						strerror(errno));
+			retv = -errno;
 			break;
 		}
 		payload = NULL;
-		socklen = sizeof(peer);
-		sysret = recvfrom(wrkinf->sock, buf, buflen, 0,
-				(struct sockaddr *)&peer, &socklen);
+		sysret = recv(wrkinf->sock, buf, buflen, 0);
 		if (sysret == -1) {
 			if (errno != EINTR)
 				fprintf(stderr, "recvfrom failed: %s\n",
 						strerror(errno));
+			retv = -errno;
 			break;
 		}
 		payload = udp_payload(buf, sysret);
-		if(payload)
+		if (!payload)
+			printf("foreign non UDP packet. Length: %d\n", sysret);
+		else if (pkt->mark != htonl(wrkinf->mark_value)){
 			printf("Foreign UDP packet. Source port: %hu, Dest " \
 					"port: %hu\n", ntohs(pkt->udph.source),
 					ntohs(pkt->udph.dest));
+		}
 	} while (*wrkinf->stop == 0 && global_exit == 0);
 	if (payload && strncmp(payload, END_TEST, strlen(END_TEST)) == 0) {
 		res = strchr(payload, ' ');
 		sscanf(res, "%lu %u", &total_bytes, &usecs);
 		*wrkinf->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
+		printf("End Test received by receive drain\n");
 	}
 	free(buf);
 	wrkinf->running = 0;
-	return NULL;
+	return (void *)((long)retv);
 }
 
-static int recv_bulk(struct cmdopts *opt, struct statistics *st,
-		struct rx_ring *rxr, int mark_value)
+static int recv_bulk(struct work_info *winf, int mark_value)
 {
 	struct timespec tm0, tm1;
 	int retv, sysret, stop_flag;
 	struct pollfd pfd;
+	const struct cmdopts *opt = winf->opt;
+	struct statistics *st = &winf->st;
+	struct rx_ring *rxr = &winf->rxr;
 
 	stop_flag = 0;
-	pfd.fd = opt->sock;
+	pfd.fd = winf->sock;
 	pfd.events = POLLIN;
 	pfd.revents = 0;
 	retv = 0;
@@ -614,139 +628,170 @@ static int recv_bulk(struct cmdopts *opt, struct statistics *st,
 	return retv;
 }
 
-static int send_bulk(struct cmdopts *opt, int mark_value);
-static int do_client(struct cmdopts *opt);
+static int send_bulk(struct work_info *inf, const struct sockaddr_ll *peer);
+static int do_client(struct work_info *inf);
 
-static int do_server(struct cmdopts *opt)
+static int init_sock(struct work_info *winf, int rx)
+{
+	int dlsock, retv, sysret;
+	struct sockaddr_ll me;
+	struct tpacket_hdr *pkthdr;
+	char *curframe;
+	const struct cmdopts *opt = winf->opt;
+	struct rx_ring *rxr = &winf->rxr;
+	struct tpacket_req req_ring;
+
+	retv = 0;
+	dlsock = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
+	if (unlikely(dlsock == -1)) {
+		fprintf(stderr, "Unable to open AF_PACKET socket: %s\n",
+				strerror(errno));
+		return -errno;
+	}
+	memset(&me, 0, sizeof(me));
+	me.sll_family = AF_PACKET;
+	me.sll_protocol = htons(ETH_P_IP);
+	me.sll_ifindex = opt->ifindex;
+	sysret = bind(dlsock, (struct sockaddr *)&me, sizeof(me));
+	if (unlikely(sysret == -1)) {
+		fprintf(stderr, "Cannot bind AF_PACKET socket to local nic: %d\n",
+				opt->ifindex);
+		retv = -errno;
+		goto err_exit_10;
+	}
+	rxr->ring = NULL;
+	if (rx == 0)
+		return dlsock;
+
+	memset(&req_ring, 0, sizeof(req_ring));
+	req_ring.tp_frame_size = winf->buflen;
+	req_ring.tp_block_size = req_ring.tp_frame_size * opt->nrframe;
+	req_ring.tp_block_nr = opt->nrblock;
+	req_ring.tp_frame_nr = opt->nrblock * opt->nrframe;
+	rxr->size = req_ring.tp_block_size * req_ring.tp_block_nr;
+	sysret = setsockopt(dlsock, SOL_PACKET, PACKET_RX_RING, &req_ring,
+			sizeof(req_ring));
+	if (unlikely(sysret == -1)) {
+		fprintf(stderr, "Cannot get receive map buffer: %s\n",
+				strerror(errno));
+		retv = -errno;
+		goto err_exit_10;
+	}
+	rxr->ring = mmap(0, rxr->size, PROT_READ|PROT_WRITE, MAP_SHARED,
+			dlsock, 0);
+	if (unlikely(rxr->ring == MAP_FAILED)) {
+		fprintf(stderr, "Cannot map receiving buffer: %s\n",
+				strerror(errno));
+		retv = -errno;
+		goto err_exit_10;
+	}
+	rxr->strip = req_ring.tp_frame_size;
+	for (curframe = rxr->ring; curframe < rxr->ring + rxr->size;
+			curframe += rxr->strip) {
+		pkthdr = (struct tpacket_hdr *)curframe;
+		pkthdr->tp_status = TP_STATUS_KERNEL;
+	}
+
+	return dlsock;
+
+err_exit_10:
+	close(dlsock);
+	return retv;
+}
+
+static inline void close_sock(struct work_info *winf)
+{
+	if (winf->rxr.ring)
+		munmap(winf->rxr.ring, winf->rxr.size);
+	close(winf->sock);
+}
+
+static int do_server(struct work_info *winf)
 {
 	int retv, len, sysret, probe_only, probelen;
-	int pktlen, start_flag, mark_value;
+	int mark_value;
 	const char *payload, *mark;
-	struct statistics st;
-	char *mesg, *curframe;
-	struct rx_ring rxr;
-	const char *pktbuf;
-	struct sockaddr_ll *peer, *fpeer;
-	struct tpacket_req req_ring;
-	struct pollfd pfd;
-	struct tpacket_hdr *pkthdr;
+	char *mesg;
+	struct sockaddr_ll peer;
+	const struct cmdopts *opt = winf->opt;
+	socklen_t socklen;
 
 	printf("Listening on ");
 	print_macaddr(opt->me, opt->melen);
 	printf("\n");
 
-	memset(&req_ring, 0, sizeof(req_ring));
-	req_ring.tp_frame_size = opt->buflen;
-	req_ring.tp_block_size = req_ring.tp_frame_size * opt->nrframe;
-	req_ring.tp_block_nr = opt->nrblock;
-	req_ring.tp_frame_nr = opt->nrblock * opt->nrframe;
-	rxr.size = req_ring.tp_block_size * req_ring.tp_block_nr;
-	sysret = setsockopt(opt->sock, SOL_PACKET, PACKET_RX_RING,
-			&req_ring, sizeof(req_ring));
-	if (unlikely(sysret == -1)) {
-		fprintf(stderr, "Cannot get receive map buffer: %s\n",
-				strerror(errno));
-		return errno;
-	}
-	rxr.ring = mmap(0, rxr.size, PROT_READ|PROT_WRITE, MAP_SHARED,
-			opt->sock, 0);
-	if (unlikely(rxr.ring == MAP_FAILED)) {
-		fprintf(stderr, "Cannot map receiving buffer: %s\n",
-				strerror(errno));
-		return errno;
-	}
-	rxr.strip = req_ring.tp_frame_size;
-	for (curframe = rxr.ring; curframe < rxr.ring + rxr.size;
-			curframe += rxr.strip) {
-		pkthdr = (struct tpacket_hdr *)curframe;
-		pkthdr->tp_status = TP_STATUS_KERNEL;
-	}
+	mesg = winf->buf + winf->buflen;
 	probelen = strlen(PROBE);
-	peer = opt->peer;
 	retv = 0;
-	pfd.fd = opt->sock;
-	pfd.events = POLLIN;
 	while (global_exit == 0) {
 		mark_value = -1;
-		start_flag = 0;
 		probe_only = 0;
-		pfd.revents = 0;
-		sysret = poll(&pfd, 1, -1);
+		socklen = sizeof(peer);
+		sysret = recvfrom(winf->sock, winf->buf, winf->buflen, 0,
+				(struct sockaddr *)&peer, &socklen);
 		if (sysret == -1) {
 			if (errno != EINTR)
 				fprintf(stderr, "poll failed: %s\n",
 						strerror(errno));
-			retv = errno;
+			retv = -errno;
 			break;
 		}
-		for (curframe = rxr.ring; curframe < rxr.ring + rxr.size;
-				curframe += rxr.strip) {
-			pkthdr = (struct tpacket_hdr *)curframe;
-			if ((pkthdr->tp_status & TP_STATUS_USER) == 0)
-				continue;
-			pktlen = pkthdr->tp_len;
-			pktbuf = curframe + pkthdr->tp_net;
-			payload = udp_payload(pktbuf, pktlen);
-			if (!payload)
-				goto next_frame;
-			if (strncmp(payload, PROBE, probelen) == 0) {
-				start_flag = 1;
-				if (strcmp(payload, PROBE_ONLY) == 0)
-					probe_only = 1;
-				else {
-					mark = strrchr(payload, ' ');
-					mark_value = atoi(mark);
-				}
-				fpeer = (struct sockaddr_ll *)(curframe +
-					TPACKET_ALIGN(sizeof(*pkthdr)));
-				memcpy(peer, fpeer, sizeof(*fpeer));
-			}
-next_frame:
-			WRITE_ONCE(pkthdr->tp_status, TP_STATUS_KERNEL);
-		}
-		if (start_flag == 0)
+		payload = udp_payload(winf->buf, sysret);
+		if (!payload || strncmp(payload, PROBE, probelen) != 0)
 			continue;
+		if (strcmp(payload, PROBE_ONLY) == 0)
+			probe_only = 1;
+		else {
+			mark = strrchr(payload, ' ');
+			mark_value = atoi(mark);
+		}
 
-		mesg = opt->buf + opt->buflen - 64;
 		sprintf(mesg, "%s %ld", PROBE_ACK, random());
-		len = prepare_udp(opt->buf, opt->buflen - 64, mesg, 0,
-				NULL);
-		sysret = sendto(opt->sock, opt->buf, len, 0,
-				(struct sockaddr *)peer, sizeof(*peer));
+		len = prepare_udp(winf->buf, winf->mtu, mesg, 0, NULL);
+		sysret = sendto(winf->sock, winf->buf, len, 0,
+				(struct sockaddr *)&peer, sizeof(peer));
 		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, "sendto failed: %s\n",
 						strerror(errno));
-			retv = errno;
+			retv = -errno;
 			break;
 		}
 		if (probe_only)
 			continue;
 
-		retv = recv_bulk(opt, &st, &rxr, mark_value);
-		if (retv < 0) {
-			retv = -retv;
+		close_sock(winf);
+		winf->sock = init_sock(winf, 1);
+		if (winf->sock < 0) {
+			retv = winf->sock;
 			break;
-		} else if (retv > 0) {
+		}
+		retv = recv_bulk(winf, mark_value);
+		if (retv > 0) {
 			fprintf(stderr, "Abort Receiving Packets: %d. " \
 					"Timeout!\n", retv);
 			retv = 0;
 		}
-		mesg = opt->buf + opt->buflen - 128;
+		mesg = winf->buf + winf->buflen;
 		len = sprintf(mesg, "%s", END_TEST);
-		sprintf(mesg+len, "%lu %u", st.gn, st.tl);
-		len = prepare_udp(opt->buf, opt->buflen - 128, mesg, 0, NULL);
-		sysret = sendto(opt->sock, opt->buf, len, 0,
-				(struct sockaddr *)peer, sizeof(*peer));
+		sprintf(mesg+len, "%lu %u", winf->st.gn, winf->st.tl);
+		((struct ip_packet *)winf->buf)->mark = htonl(mark_value);
+		len = prepare_udp(winf->buf, winf->mtu, mesg, 0, NULL);
+		sysret = sendto(winf->sock, winf->buf, len, 0,
+				(struct sockaddr *)&peer, sizeof(peer));
 		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, "send to failed: %s\n",
 						strerror(errno));
-			retv = errno;
+			retv = -errno;
 			break;
 		}
+		close_sock(winf);
+		winf->sock = init_sock(winf, 0);
+		if (unlikely(winf->sock < 0))
+			break;
 	}
-	munmap(rxr.ring, rxr.size);
+
 	return retv;
 }
 
@@ -815,8 +860,8 @@ static inline void remove_instance_lock(const char *lockfile)
 int main(int argc, char *argv[])
 {
 	struct cmdopts cmdopt;
-	int dlsock, sysret, retv, nbits, mtu;
-	struct sockaddr_ll me, peer;
+	struct work_info winf;
+	int retv, nbits, mtu;
 	struct netcard *nic, *nnic;
 	static const char lockfile[] = "/run/lock/linkprobe";
 
@@ -831,53 +876,36 @@ int main(int argc, char *argv[])
 	retv = parse_option(argc, argv, &cmdopt);
 	if (retv != 0)
 		goto exit_10;
-	dlsock = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
-	if (unlikely(dlsock == -1)) {
-		fprintf(stderr, "Unable to open AF_PACKET socket: %s\n",
-				strerror(errno));
-		retv = errno;
-		goto exit_10;
-	}
-	cmdopt.mtu = getmtu(dlsock, cmdopt.ifindex);
-	mtu = cmdopt.mtu;
+	memset(&winf, 0, sizeof(winf));
+	winf.opt = &cmdopt;
+	winf.mtu = getmtu(cmdopt.ifindex);
+	mtu = winf.mtu;
 	nbits = 0;
 	while (mtu) {
 		nbits += 1;
 		mtu >>= 1;
 	}
-	cmdopt.buflen = (1 << nbits);
-	cmdopt.buf = malloc(cmdopt.buflen);
-	if (unlikely(!cmdopt.buf)) {
+	winf.buflen = (1 << nbits);
+	winf.pid = getpid();
+	winf.buf = malloc(winf.buflen + 128);
+	if (unlikely(!winf.buf)) {
 		fprintf(stderr, "Out of Memory!\n");
-		retv = ENOMEM;
-		goto exit_20;
+		retv = -ENOMEM;
+		goto exit_10;
 	}
-
-	memset(&me, 0, sizeof(me));
-	me.sll_family = AF_PACKET;
-	me.sll_protocol = htons(ETH_P_IP);
-	me.sll_ifindex = cmdopt.ifindex;
-	sysret = bind(dlsock, (struct sockaddr *)&me, sizeof(me));
-	if (unlikely(sysret == -1)) {
-		fprintf(stderr, "Cannot bind AF_PACKET socket to local nic: %d\n",
-				cmdopt.ifindex);
-		retv = errno;
-		goto exit_30;
+	winf.sock = init_sock(&winf, 0);
+	if (unlikely(winf.sock) < 0) {
+		retv = -winf.sock;
+		goto exit_10;
 	}
 	install_handler(sig_handler);
-	cmdopt.sock = dlsock;
-	cmdopt.peer = &peer;
 	if (cmdopt.listen) {
-		retv = do_server(&cmdopt);
+		retv = do_server(&winf);
 	} else {
-		retv = do_client(&cmdopt);
+		retv = do_client(&winf);
 	}
 
-
-exit_30:
-	free(cmdopt.buf);
-exit_20:
-	close(dlsock);
+	close_sock(&winf);
 exit_10:
 	list_for_each_entry_safe(nic, nnic, &ifhead, lnk) {
 		list_del(&nic->lnk, &ifhead);
@@ -887,81 +915,77 @@ exit_10:
 	return retv;
 }
 
-static int do_client(struct cmdopts *opt)
+static int do_client(struct work_info *winf)
 {
-	struct sockaddr_ll *peer;
+	struct sockaddr_ll peer;
+	const struct cmdopts *opt = winf->opt;
 	const char *payload;
-	socklen_t socklen;
 	struct pollfd pfd;
-	int retv, len, sysret, count, mark_value;
+	int retv, len, sysret, count;
 	char *mesg;
 	struct timespec tm;
+	struct ip_packet *ipkt;
 
 	retv = 0;
-	pfd.fd = opt->sock;
+	mesg = winf->buf + winf->buflen;
+	pfd.fd = winf->sock;
 	pfd.events = POLLIN;
-	peer = opt->peer;
-	memset(peer, 0, sizeof(*peer));
-	peer->sll_family = AF_PACKET;
-	peer->sll_protocol = htons(ETH_P_IP);
+	memset(&peer, 0, sizeof(peer));
+	peer.sll_family = AF_PACKET;
+	peer.sll_protocol = htons(ETH_P_IP);
+	peer.sll_halen = opt->tarlen;
+	memcpy(peer.sll_addr, opt->target, opt->tarlen);
+	peer.sll_ifindex = opt->ifindex;
 
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm);
-	mark_value = tm.tv_nsec;
-	mesg = opt->buf + opt->buflen - 128;
+	winf->mark_value = tm.tv_nsec & 0x0ffffffff;
+	ipkt = (struct ip_packet *)winf->buf;
+	ipkt->mark = htonl(winf->mark_value);
+	retv = 0;
 	count = 0;
 	if (opt->probe_only)
 		sprintf(mesg, "%s", PROBE_ONLY);
 	else
-		sprintf(mesg, "%s %d", PROBE, mark_value);
-	len = prepare_udp(opt->buf, opt->mtu - 128, mesg, 0, NULL);
+		sprintf(mesg, "%s %d", PROBE, winf->mark_value);
 	do {
-		peer->sll_halen = opt->tarlen;
-		memcpy(peer->sll_addr, opt->target, opt->tarlen);
-		peer->sll_ifindex = opt->ifindex;
-		sysret = sendto(opt->sock, opt->buf, len, 0,
-				(struct sockaddr *)peer, sizeof(*peer));
+		count += 1;
+		len = prepare_udp(winf->buf, winf->mtu, mesg, 0, NULL);
+		sysret = sendto(winf->sock, winf->buf, len, 0,
+				(struct sockaddr *)&peer, sizeof(peer));
 		if (sysret == -1) {
 			if (errno != EINTR)
 				fprintf(stderr, "sendto failed: %s\n",
 						strerror(errno));
-			retv = errno;
+			retv = -errno;
 			break;
 		}
-
+		retv = 0;
 		pfd.revents = 0;
-		sysret = poll(&pfd, 1, 1000);
-		if (sysret == 0) {
-			retv = 255;
-			break;
-		} else if (unlikely(sysret == -1)) {
+		sysret = poll(&pfd, 1, 500);
+		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, "poll failed: %s\n",
 						strerror(errno));
-			retv = errno;
+			retv = -errno;
 			break;
+		} else if (sysret == 0) {
+			retv = 255;
+			continue;
 		}
-		if ((pfd.revents & POLLIN) == 0) {
-			fprintf(stderr, "Error on link\n");
-			retv = 254;
-			break;
-		}
-		socklen = sizeof(*peer);
-		sysret = recvfrom(opt->sock, opt->buf, opt->buflen, 0,
-				(struct sockaddr *)peer, &socklen);
+		sysret = recv(winf->sock, winf->buf, winf->buflen, 0);
 		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, "recvfrom failed: %s\n",
 						strerror(errno));
-			retv = errno;
+			retv = -errno;
 			break;
 		}
-		payload = udp_payload(opt->buf, sysret);
-		if (payload && strncmp(payload, PROBE_ACK, strlen(PROBE_ACK))
-				== 0)
+		payload = udp_payload(winf->buf, sysret);
+		if (!payload)
+			continue;
+		if (strncmp(payload, PROBE_ACK, strlen(PROBE_ACK)) == 0)
 			break;
-		len = prepare_udp(opt->buf, opt->mtu - 128, mesg, 0, NULL);
-		count += 1;
-	} while (global_exit == 0 && retv == 0 && count < 50);
+	} while (global_exit == 0 && count < 50);
 	if (retv == 0 && count < 50)
 		printf("Link OK: ");
 	else
@@ -973,12 +997,15 @@ static int do_client(struct cmdopts *opt)
 	if (retv != 0 || opt->probe_only)
 		return retv;
 
-	retv = send_bulk(opt, mark_value);
+	tm.tv_sec = 0;
+	tm.tv_nsec = 5000000000l;
+	nanosleep(&tm, NULL);
+	retv = send_bulk(winf, &peer);
 
 	return retv;
 }
 
-static int send_bulk(struct cmdopts *opt, int mark_value)
+static int send_bulk(struct work_info *winf, const struct sockaddr_ll *peer)
 {
 	int retv, buflen, off, len, sysret, count;
 	FILE *fin;
@@ -987,15 +1014,14 @@ static int send_bulk(struct cmdopts *opt, int mark_value)
 	timer_t tmid;
 	struct sigevent sevent;
 	struct itimerspec itm;
-	struct sockaddr_ll *peer;
-	socklen_t socklen;
 	const char *payload;
 	const char *res;
 	struct timespec tm0, tm1;
 	struct pollfd pfd;
 	struct ip_packet *pkt;
-	struct work_info wrkinf;
+	struct work_info subwrk;
 	volatile double speed;
+	const struct cmdopts *opt = winf->opt;
 
 	speed = -1.0;
 	retv = 0;
@@ -1006,9 +1032,9 @@ static int send_bulk(struct cmdopts *opt, int mark_value)
 		return errno;
 	}
 	off = 0;
-	buflen = opt->buflen;
+	buflen = winf->buflen;
 	do {
-		len = fread(opt->buf+off, 1, buflen, fin);
+		len = fread(winf->buf+off, 1, buflen, fin);
 		if (unlikely(len == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, "Cannot read random bytes: %s\n",
@@ -1020,15 +1046,6 @@ static int send_bulk(struct cmdopts *opt, int mark_value)
 		buflen -= len;
 	} while (buflen > 0);
 	fclose(fin);
-
-	mark_value = htonl(mark_value);
-	peer = opt->peer;
-	memset(peer, 0, sizeof(*peer));
-	peer->sll_family = AF_PACKET;
-	peer->sll_protocol = htons(ETH_P_IP);
-	peer->sll_ifindex = opt->ifindex;
-	peer->sll_halen = opt->tarlen;
-	memcpy(peer->sll_addr, opt->target, opt->tarlen);
 
 	memset(&sact, 0, sizeof(sact));
 	sact.sa_handler = sig_handler;
@@ -1047,100 +1064,102 @@ static int send_bulk(struct cmdopts *opt, int mark_value)
 		goto exit_10;
 	}
 	finish_up = 0;
-	wrkinf.sock = opt->sock;
-	wrkinf.stop = &finish_up;
-	wrkinf.mtu = opt->mtu;
-	wrkinf.running = -1;
-	wrkinf.bandwidth = &speed;
-	sysret = pthread_create(&wrkinf.thid, NULL, receive_drain, &wrkinf);
+	memset(&subwrk, 0, sizeof(subwrk));
+	subwrk.mark_value = winf->mark_value;
+	subwrk.opt = winf->opt;
+	subwrk.sock = winf->sock;
+	subwrk.buflen = winf->buflen;
+	subwrk.stop = &finish_up;
+	subwrk.mtu = winf->mtu;
+	subwrk.running = -1;
+	subwrk.bandwidth = &speed;
+	sysret = pthread_create(&subwrk.thid, NULL, receive_drain, &subwrk);
 	if (unlikely(sysret != 0))
 		fprintf(stderr, "Warning! Cannot create drain thread: %s\n",
 			strerror(sysret));
 	count = 0;
-	pkt = (struct ip_packet *)opt->buf;
-	pkt->mark = mark_value;
+	pkt = (struct ip_packet *)winf->buf;
+	pkt->mark = htonl(winf->mark_value);
 	memset(&itm, 0, sizeof(itm));
 	itm.it_value.tv_sec = opt->duration;
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
 	sysret = timer_settime(tmid, 0, &itm, NULL);
 	if (unlikely(sysret == -1)) {
-		fprintf(stderr, "Cannot set timer: %s\n", strerror(errno));
+		fprintf(stderr, "Cannot arm timer: %s\n", strerror(errno));
 		retv = errno;
 		goto exit_20;
 	}
 	do {
 		rinc = random();
 		tmpl = (long *)(pkt->payload);
-		while (tmpl < (long *)(opt->buf+opt->buflen)) {
+		while (tmpl < (long *)(winf->buf+winf->buflen)) {
 			*tmpl += rinc;
 			tmpl += 1;
 		}
 		pkt->seq = count;
-		len = prepare_udp(opt->buf, opt->mtu, NULL, 1, &opt->hdinc);
-		sysret = sendto(opt->sock, opt->buf, len, 0,
+		len = prepare_udp(winf->buf, winf->mtu, NULL, 1, &opt->hdinc);
+		sysret = sendto(winf->sock, winf->buf, len, 0,
 				(struct sockaddr *)peer, sizeof(*peer));
 		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, "Send failed: %s\n",
 						strerror(errno));
-			if (finish_up == 0)
-				retv = errno;
-			continue;
+			retv = -errno;
+			goto exit_20;
 		}
 		count += 1;
-	} while (finish_up == 0 && global_exit == 0 && retv == 0);
-	len = prepare_udp(opt->buf, opt->mtu, LAST_PACKET, 1, &opt->hdinc);
-	sysret = sendto(opt->sock, opt->buf, len, 0, 
+	} while (finish_up == 0 && global_exit == 0);
+	len = prepare_udp(winf->buf, winf->mtu, LAST_PACKET, 1, &opt->hdinc);
+	sysret = sendto(winf->sock, winf->buf, len, 0, 
 			(struct sockaddr *)peer, sizeof(*peer));
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	if (unlikely(sysret == -1)) {
 		fprintf(stderr, "Send failed: %s\n", strerror(errno));
-		retv = errno;
+		retv = -errno;
 		goto exit_20;
 	}
 	count += 1;
 	rinc = tm_elapsed(&tm0, &tm1) / 1000;
 	printf("Total %d packets sent in %ld milliseconds\n", count, rinc);
-	pfd.fd = opt->sock;
+	pfd.fd = winf->sock;
 	pfd.events = POLLIN;
-	pfd.revents = 0;
 	count = 0;
 	global_exit = 0;
 	payload = NULL;
-	if (wrkinf.running != -1)
-		pthread_join(wrkinf.thid, NULL);
+	if (subwrk.running != -1)
+		pthread_join(subwrk.thid, NULL);
 	if (speed != -1.0)
 		goto exit_30;
 	do {
+		retv = 0;
+		pfd.revents = 0;
 		sysret = poll(&pfd, 1, 500);
 		if (unlikely(sysret == 0)) {
 			fprintf(stderr, Timeout);
 			retv = 255;
-			break;
+			continue;
 		} else if (unlikely(sysret == -1)) {
 			fprintf(stderr, PollFail, strerror(errno));
-			retv = errno;
+			retv = -errno;
 			break;
 		}
 		if ((pfd.revents & POLLIN) == 0) {
 			fprintf(stderr, LinkErr);
-			retv = 255;
+			retv = -255;
 			break;
 		}
-		socklen = sizeof(peer);
 		payload = NULL;
-		sysret = recvfrom(opt->sock, opt->buf, len, 0,
-				(struct sockaddr *)peer, &socklen);
+		sysret = recv(winf->sock, winf->buf, len, 0);
 		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, "recvfrom failed: %s\n",
 						strerror(errno));
-			retv = errno;
+			retv = -errno;
 			break;
 		}
-		payload = udp_payload(opt->buf, sysret);
+		payload = udp_payload(winf->buf, sysret);
 		if (payload) {
-			pkt = (struct ip_packet *)opt->buf;
+			pkt = (struct ip_packet *)winf->buf;
 			if (strncmp(payload, END_TEST, strlen(END_TEST)) == 0)
 				break;
 			printf("Foreign UDP packet. Source port: %hu, Dest " \
