@@ -91,6 +91,7 @@ struct cmdopts {
 	int nrblock;
 	int nrframe;
 	unsigned short duration;
+	unsigned short numths;
 	uint16_t ifindex;
 	uint8_t tarlen, melen;
 	uint8_t listen:1;
@@ -266,6 +267,12 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 			.val = 'f'
 		},
 		{
+			.name = "threads",
+			.has_arg = 1,
+			.flag = NULL,
+			.val = 't'
+		},
+		{
 		}
 	};
 	static const unsigned short defdur = 20;
@@ -284,7 +291,7 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 	fin = 0;
 	opterr = 0;
 	while (fin == 0) {
-		c = getopt_long(argc, argv, ":lpbi:d:a:o:n:f:",
+		c = getopt_long(argc, argv, ":lpbi:d:a:o:n:f:t:",
 				options, NULL);
 		switch(c) {
 			case -1:
@@ -298,6 +305,9 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 				fprintf(stderr, "Missing arguments for %c. " \
 						"option ignored\n",
 						(char)(optopt));
+				break;
+			case 't':
+				exopt->numths = atoi(optarg);
 				break;
 			case 'n':
 				exopt->nrblock = atoi(optarg);
@@ -350,6 +360,8 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 				assert(0);
 		}
 	}
+	if (exopt->numths == 0)
+		exopt->numths = 2;
 	if (exopt->nrblock == 0)
 		exopt->nrblock = 64;
 	if (exopt->nrframe == 0)
@@ -866,11 +878,12 @@ static int do_server(struct worker_params *wparam)
 		close(wparam->sock);
 
 		volatile int stop = 0;
-		int numths = 1, i;
+		int numths, i;
 		struct thread_info *thinfs, *thinf;
 		void *thres;
 		struct statistics st;
 
+		numths = opt->numths;
 		thinfs = malloc(sizeof(struct thread_info)*numths);
 		assert(thinfs != NULL);
 		for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
@@ -909,6 +922,7 @@ static int do_server(struct worker_params *wparam)
 			if (st.tl < thinf->st.tl)
 				st.tl = thinf->st.tl;
 		}
+		free(thinfs);
 		wparam->sock = create_sock(opt);
 		assert(wparam->sock >= 0);
 		buf = wparam->buf;
