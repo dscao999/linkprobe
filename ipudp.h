@@ -10,6 +10,7 @@ struct ip_packet {
 	struct udphdr udph;
 	unsigned int mark;
 	unsigned long seq;
+	unsigned int msgtyp;
 	char payload[];
 };
 
