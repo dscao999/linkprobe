@@ -535,10 +535,8 @@ static int check_ring(const struct cmdopts *opt, struct statistics *st,
 		} else {
 			st->gn += pktlen + 18;
 			st->gcnt += 1;
-			if (strcmp(payload, LAST_PACKET) == 0) {
-				assert(ippkt->msgtyp == htonl(V_LAST_PACKET));
+			if (ippkt->msgtyp == htonl(V_LAST_PACKET))
 				stop_flag = 1;
-			}
 		}
 		WRITE_ONCE(pkthdr->tp_status, TP_STATUS_KERNEL);
 	}
@@ -600,9 +598,8 @@ static void *receive_drain(void *arg)
 					ntohs(pkt->udph.dest));
 		}
 	} while (*thinf->stop == 0 && global_exit == 0);
-	if (payload && strncmp(payload, END_TEST, strlen(END_TEST)) == 0) {
-		assert(pkt->mark == htonl(wparam->mark_value) &&
-					pkt->msgtyp == htonl(V_END_TEST));
+	if (payload && pkt->mark == htonl(wparam->mark_value) &&
+				pkt->msgtyp == htonl(V_END_TEST)) {
 		res = strchr(payload, ' ');
 		sscanf(res, "%lu %u", &total_bytes, &usecs);
 		*thinf->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
@@ -655,7 +652,6 @@ static int recv_bulk(struct thread_info *thinf)
 		}
 		stop_flag = check_ring(opt, st, rxr, wparam->mark_value);
 	} while (stop_flag == 0 && global_exit == 0 && *thinf->stop == 0);
-	printf("stop_flag: %d, *thinf->stop: %d, retv: %d\n", stop_flag, *thinf->stop, retv);
 	if (stop_flag)
 		*thinf->stop = 1;
 	pfd.revents = 0;
@@ -833,7 +829,7 @@ exit_10:
 
 static int do_server(struct worker_params *wparam)
 {
-	int retv, len, sysret, probe_only, probelen;
+	int retv, len, sysret, probe_only;
 	const char *payload, *mark;
 	char *mesg, *buf;
 	struct sockaddr_ll peer;
@@ -847,7 +843,6 @@ static int do_server(struct worker_params *wparam)
 	printf("\n");
 
 	mesg = wparam->buf + pinf->buflen;
-	probelen = strlen(PROBE);
 	retv = 0;
 	wparam->mark_value = -1;
 	while (global_exit == 0) {
@@ -863,11 +858,10 @@ static int do_server(struct worker_params *wparam)
 			break;
 		}
 		payload = udp_payload(wparam->buf, sysret);
-		if (!payload || strncmp(payload, PROBE, probelen) != 0)
+		if (!payload || (ipkt->msgtyp != htonl(V_PROBE) &&
+					ipkt->msgtyp != htonl(V_PROBE_ONLY)))
 			continue;
-		assert((ipkt->msgtyp == htonl(V_PROBE) ||
-				 ipkt->msgtyp == htonl(V_PROBE_ONLY)));
-		if (strcmp(payload, PROBE_ONLY) == 0)
+		if (ipkt->msgtyp == htonl(V_PROBE_ONLY))
 			probe_only = 1;
 		else {
 			mark = strrchr(payload, ' ');
@@ -1153,13 +1147,9 @@ static int do_client(struct worker_params *wparam)
 			break;
 		}
 		payload = udp_payload(wparam->buf, sysret);
-		if (!payload)
-			continue;
-		if (strncmp(payload, PROBE_ACK, strlen(PROBE_ACK)) == 0) {
-			assert(ipkt->msgtyp == htonl(V_PROBE_ACK) &&
-					ipkt->mark == htonl(wparam->mark_value));
+		if (payload && ipkt->msgtyp == htonl(V_PROBE_ACK) &&
+				ipkt->mark == htonl(wparam->mark_value))
 			break;
-		}
 	} while (global_exit == 0 && count < 10);
 	if (count == 10)
 		retv = 255;
@@ -1333,6 +1323,7 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 		pthread_join(thinf.thid, NULL);
 	if (speed != -1.0)
 		goto exit_30;
+	pkt = (struct ip_packet *)wparam->buf;
 	do {
 		pfd.revents = 0;
 		sysret = poll(&pfd, 1, 200);
@@ -1360,19 +1351,18 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 		}
 		payload = udp_payload(wparam->buf, sysret);
 		if (payload) {
-			pkt = (struct ip_packet *)wparam->buf;
-			if (strncmp(payload, END_TEST, strlen(END_TEST)) == 0) {
-				assert(pkt->mark == htonl(wparam->mark_value) &&
-						pkt->msgtyp == htonl(V_END_TEST));
+			if (pkt->mark == htonl(wparam->mark_value) &&
+					pkt->msgtyp == htonl(V_END_TEST))
 				break;
-			}
 			printf("Foreign UDP packet. Source port: %hu, Dest " \
 					"port: %hu\n", ntohs(pkt->udph.source),
 					ntohs(pkt->udph.dest));
 		} else
 			printf("Foreign non UDP packet.\n");
 	} while (count < 10 && global_exit == 0);
-	if (retv != 0 || count == 10 ) {
+	if (count == 10)
+		retv = 255;
+	if (retv != 0) {
 		fprintf(stderr, Timeout);
 		goto exit_20;
 	}
