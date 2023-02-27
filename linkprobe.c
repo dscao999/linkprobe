@@ -74,20 +74,24 @@ struct rx_ring {
 	int strip;
 };
 
+struct packet_record {
+	unsigned long pkts;
+	unsigned short dport, sport;
+	unsigned int saddr;
+	unsigned int daddr;
+};
+
 struct header_inc {
-	unsigned int dport:1;
-	unsigned int sport:1;
-	unsigned int daddr:1;
-	unsigned int saddr:1;
+	unsigned int inc_dport:1;
+	unsigned int inc_sport:1;
+	unsigned int inc_daddr:1;
+	unsigned int inc_saddr:1;
 };
 
 struct cmdopts {
 	unsigned char target[16];
 	unsigned char me[16];
-	union {
-		struct header_inc hdinc;
-		unsigned int hdv;
-	};
+	struct header_inc hdinc;
 	int nrblock;
 	int nrframe;
 	unsigned short duration;
@@ -122,6 +126,7 @@ struct thread_info {
 	volatile double *bandwidth;
 	volatile int running;
 	volatile int *stop;
+	struct packet_record prec;
 	struct worker_params wparam;
 	struct statistics st;
 	const struct sockaddr_ll *peer;
@@ -317,26 +322,26 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 				break;
 			case 'a':
 				if (strcmp(optarg, "dport") == 0)
-					exopt->hdinc.dport = 1;
+					exopt->hdinc.inc_dport = 1;
 				else if (strcmp(optarg, "sport") == 0)
-					exopt->hdinc.sport = 1;
+					exopt->hdinc.inc_sport = 1;
 				else if (strcmp(optarg, "daddr") == 0)
-					exopt->hdinc.daddr = 1;
+					exopt->hdinc.inc_daddr = 1;
 				else if (strcmp(optarg, "saddr") == 0)
-					exopt->hdinc.saddr = 1;
+					exopt->hdinc.inc_saddr = 1;
 				else
 					fprintf(stderr, "Invalid variable: " \
 							"%s ignored\n", optarg);
 				break;
 			case 'o':
 				if (strcmp(optarg, "dport") == 0)
-					exopt->hdinc.dport = 0;
+					exopt->hdinc.inc_dport = 0;
 				else if (strcmp(optarg, "sport") == 0)
-					exopt->hdinc.sport = 0;
+					exopt->hdinc.inc_sport = 0;
 				else if (strcmp(optarg, "daddr") == 0)
-					exopt->hdinc.daddr = 0;
+					exopt->hdinc.inc_daddr = 0;
 				else if (strcmp(optarg, "saddr") == 0)
-					exopt->hdinc.saddr = 0;
+					exopt->hdinc.inc_saddr = 0;
 				else
 					fprintf(stderr, "Invalid variable: " \
 							"%s ignored\n", optarg);
@@ -402,8 +407,11 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 			exopt->duration = defdur;
 		} else if (exopt->duration == 0)
 			exopt->duration = defdur;
-		if (exopt->hdv == 0)
-			exopt->hdinc.dport = 1;
+		if (exopt->hdinc.inc_dport == 0 &&
+				exopt->hdinc.inc_sport == 0 &&
+				exopt->hdinc.inc_daddr == 0 &&
+				exopt->hdinc.inc_saddr == 0)
+			exopt->hdinc.inc_dport = 1;
 	} else {
 		if (exopt->probe_only) {
 			exopt->probe_only = 0;
@@ -416,19 +424,32 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 	return retv;
 }
 
+static const unsigned short c_dport = 10, c_sport = 10;
+static const unsigned int c_saddr = (192 << 24) | (168 << 16) | (117 << 8) | 10;
+static const unsigned int c_daddr = (192 << 24) | (168 << 16) | (119 << 8) | 10;
+
 static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
-		const struct header_inc *hdinc)
+		struct packet_record *prec, const struct header_inc *hdinc)
 {
 	struct ip_packet *pkt;
 	struct iphdr *iph;
 	struct timespec tm;
 	int len, headlen;
-	static unsigned short dport = 10, sport = 10;
-	static unsigned int saddr = (192 << 24) | (168 << 16) | (117 << 8) | 10;
-	static unsigned int daddr = (192 << 24) | (168 << 16) | (119 << 8) | 10;
-	static unsigned long pkts = 1;
+	unsigned short dport, sport;
+	unsigned int saddr, daddr;
 	FILE *fout;
 
+	if (prec) {
+		dport = prec->dport;
+		sport = prec->sport;
+		saddr = prec->saddr;
+		daddr = prec->daddr;
+	} else {
+		dport = c_dport;
+		sport = c_sport;
+		saddr = c_saddr;
+		daddr = c_daddr;
+	}
 	headlen = sizeof(struct iphdr)+sizeof(struct udphdr);
 	memset(buf, 0, headlen);
 	pkt = (struct ip_packet *)buf;
@@ -463,18 +484,17 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 	iph->check = htons(iphdr_check(iph));
 	pkt->udph.check = htons(udp_check(iph, &pkt->udph));
 	if (unlikely(udp_check(iph, &pkt->udph) != 0)) {
-		fprintf(stderr, "bad udp checksum at packet no. %lu\n", pkts);
+		fprintf(stderr, "bad udp checksum at packet no. %lu\n", pkt->seq);
 		fout = fopen("/tmp/packet.dat", "wb");
 		fwrite(iph, 1, len, fout);
 		fclose(fout);
-	} else {
-		pkts += 1;
-		if (hdinc) {
-			dport += hdinc->dport;
-			sport += hdinc->sport;
-			daddr += hdinc->daddr;
-			saddr += hdinc->saddr;
-		}
+	}
+	if (prec && hdinc) {
+		prec->pkts += 1;
+		prec->dport += hdinc->inc_dport;
+		prec->sport += hdinc->inc_sport;
+		prec->daddr += hdinc->inc_daddr;
+		prec->saddr += hdinc->inc_saddr;
 	}
 
 	assert(iphdr_check(iph) == 0);
@@ -811,7 +831,7 @@ static void * recv_horse(void *arg)
 	ipkt->mark = htonl(wparam->mark_value);
 	ipkt->msgtyp = htonl(V_RECV_READY);
 	peer = thinf->peer;
-	len = prepare_udp(buf, pinf->mtu, RECV_READY, 0, NULL);
+	len = prepare_udp(buf, pinf->mtu, RECV_READY, 0, NULL, NULL);
 	sysret = sendto(wparam->sock, buf, len, 0,
 			(const struct sockaddr *)peer, sizeof(*peer));
 	free(buf);
@@ -875,7 +895,7 @@ static int do_server(struct worker_params *wparam)
 
 		sprintf(mesg, "%s %ld", PROBE_ACK, random());
 		ipkt->msgtyp = htonl(V_PROBE_ACK);
-		len = prepare_udp(wparam->buf, pinf->mtu, mesg, 0, NULL);
+		len = prepare_udp(wparam->buf, pinf->mtu, mesg, 0, NULL, NULL);
 		sysret = sendto(wparam->sock, wparam->buf, len, 0,
 				(const struct sockaddr *)&peer, sizeof(peer));
 		if (unlikely(sysret == -1)) {
@@ -952,7 +972,7 @@ static int do_server(struct worker_params *wparam)
 		sprintf(mesg+len, "%lu %u", st.gn, st.tl);
 		ipkt->mark = htonl(wparam->mark_value);
 		ipkt->msgtyp = htonl(V_END_TEST);
-		len = prepare_udp(buf, pinf->mtu, mesg, 0, NULL);
+		len = prepare_udp(buf, pinf->mtu, mesg, 0, NULL, NULL);
 		sysret = sendto(wparam->sock, wparam->buf, len, 0,
 				(struct sockaddr *)&peer, sizeof(peer));
 		if (unlikely(sysret == -1)) {
@@ -1140,7 +1160,7 @@ static int do_client(struct worker_params *wparam)
 	}
 	do {
 		ipkt->msgtyp = msgtyp;
-		len = prepare_udp(wparam->buf, pinf->mtu, mesg, 0, NULL);
+		len = prepare_udp(wparam->buf, pinf->mtu, mesg, 0, NULL, NULL);
 		sysret = sendto(wparam->sock, wparam->buf, len, 0,
 				(struct sockaddr *)&peer, sizeof(peer));
 		if (sysret == -1) {
@@ -1223,10 +1243,9 @@ static int do_client(struct worker_params *wparam)
 static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *peer)
 {
 	int retv, buflen, off, len, sysret;
-       	long count;
+	long count, telapsed;
 	FILE *fin;
 	struct sigaction sact, oact;
-	long rinc, *tmpl;
 	timer_t tmid;
 	struct sigevent sevent;
 	struct itimerspec itm;
@@ -1290,6 +1309,11 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 	thinf.stop = &finish_up;
 	thinf.running = -1;
 	thinf.bandwidth = &speed;
+	thinf.prec.sport = c_sport;
+	thinf.prec.dport = c_dport;
+	thinf.prec.saddr = c_saddr;
+	thinf.prec.daddr = c_daddr;
+	thinf.prec.pkts = 0;
 	sysret = pthread_create(&thinf.thid, NULL, receive_drain, &thinf);
 	if (unlikely(sysret != 0))
 		fprintf(stderr, "Warning! Cannot create drain thread: %s\n",
@@ -1308,14 +1332,9 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 		goto exit_20;
 	}
 	do {
-		rinc = random();
-		tmpl = (long *)(pkt->payload);
-		while (tmpl < (long *)(wparam->buf+pinf->buflen)) {
-			*tmpl += rinc;
-			tmpl += 1;
-		}
+		*(long *)(pkt->payload) = random();
 		pkt->seq = count;
-		len = prepare_udp(wparam->buf, pinf->mtu, NULL, 1, &opt->hdinc);
+		len = prepare_udp(wparam->buf, pinf->mtu, NULL, 1, &thinf.prec, &opt->hdinc);
 		sysret = sendto(wparam->sock, wparam->buf, len, 0,
 				(struct sockaddr *)peer, sizeof(*peer));
 		if (unlikely(sysret == -1)) {
@@ -1328,7 +1347,7 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 		count += 1;
 	} while (finish_up == 0 && global_exit == 0);
 	pkt->msgtyp = htonl(V_LAST_PACKET);
-	len = prepare_udp(wparam->buf, pinf->mtu, LAST_PACKET, 1, &opt->hdinc);
+	len = prepare_udp(wparam->buf, pinf->mtu, LAST_PACKET, 1, &thinf.prec, &opt->hdinc);
 	sysret = sendto(wparam->sock, wparam->buf, len, 0, 
 			(struct sockaddr *)peer, sizeof(*peer));
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
@@ -1338,8 +1357,8 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 		goto exit_20;
 	}
 	count += 1;
-	rinc = tm_elapsed(&tm0, &tm1) / 1000;
-	printf("Total %ld packets sent in %ld milliseconds\n", count, rinc);
+	telapsed = tm_elapsed(&tm0, &tm1) / 1000;
+	printf("Total %ld packets sent in %ld milliseconds\n", count, telapsed);
 	pfd.fd = wparam->sock;
 	pfd.events = POLLIN;
 	count = 0;
