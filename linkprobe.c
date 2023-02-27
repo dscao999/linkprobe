@@ -837,6 +837,11 @@ static int do_server(struct worker_params *wparam)
 	const struct cmdopts *opt = pinf->opt;
 	socklen_t socklen;
 	struct ip_packet *ipkt = (struct ip_packet *)wparam->buf;
+	volatile int stop;
+	int numths, i;
+	struct thread_info *thinfs, *thinf;
+	void *thres;
+	struct statistics st;
 
 	printf("Listening on ");
 	print_macaddr(opt->me, opt->melen);
@@ -885,15 +890,18 @@ static int do_server(struct worker_params *wparam)
 
 		close(wparam->sock);
 
-		volatile int stop = 0;
-		int numths, i;
-		struct thread_info *thinfs, *thinf;
-		void *thres;
-		struct statistics st;
-
 		numths = opt->numths;
 		thinfs = malloc(sizeof(struct thread_info)*numths);
-		assert(thinfs != NULL);
+		if (unlikely(thinfs == NULL)) {
+			fprintf(stderr, "Out of Memory!\n");
+			retv = -ENOMEM;
+			break;
+		}
+		for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
+			thinf->running = -1;
+			thinf->wparam.sock = -1;
+		}
+		stop = 0;
 		for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
 			thinf->wparam.pinf = wparam->pinf;
 			thinf->wparam.mark_value = wparam->mark_value;
@@ -901,14 +909,18 @@ static int do_server(struct worker_params *wparam)
 			thinf->running = -1;
 			thinf->peer = &peer;
 			thinf->wparam.sock = init_sock(&thinf->wparam, 1, 1);
-			if (unlikely(thinf->wparam.sock < 0))
-				assert(0);
+			if (unlikely(thinf->wparam.sock < 0)) {
+				retv = thinf->wparam.sock;
+				goto err_exit_50;
+			}
 			sysret = pthread_create(&thinf->thid, NULL, recv_horse, thinf);
 			if (unlikely(sysret != 0)) {
 				fprintf(stderr, "Cannot create thread: %s\n", strerror(sysret));
-				assert(0);
+				retv = -sysret;
+				goto err_exit_50;
 			}
 		}
+
 		st.gn = 0;
 		st.bn = 0;
 		st.tl = 0;
@@ -931,6 +943,7 @@ static int do_server(struct worker_params *wparam)
 				st.tl = thinf->st.tl;
 		}
 		free(thinfs);
+
 		wparam->sock = create_sock(opt);
 		assert(wparam->sock >= 0);
 		buf = wparam->buf;
@@ -951,6 +964,18 @@ static int do_server(struct worker_params *wparam)
 		}
 	}
 
+	return retv;
+
+err_exit_50:
+	for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
+		if (thinf->running != -1) {
+			pthread_cancel(thinf->thid);
+			pthread_join(thinf->thid, NULL);
+		}
+		if (thinf->wparam.sock >= 0)
+			close_sock(&thinf->wparam);
+	}
+	free(thinfs);
 	return retv;
 }
 
