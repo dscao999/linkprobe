@@ -633,7 +633,7 @@ static void *receive_drain(void *arg)
 static int recv_bulk(struct thread_info *thinf)
 {
 	struct timespec tm0, tm1;
-	int retv, sysret, stop_flag;
+	int retv, sysret, stop_flag, tmcnt;
 	struct pollfd pfd;
 	struct worker_params *wparam = &thinf->wparam;
 	const struct proc_info *pinf = wparam->pinf;
@@ -643,23 +643,39 @@ static int recv_bulk(struct thread_info *thinf)
 
 	pfd.fd = wparam->sock;
 	pfd.events = POLLIN;
-	pfd.revents = 0;
 	retv = 0;
 	st->gcnt = 0;
 	st->bcnt = 0;
 	st->gn = 0;
 	st->bn = 0;
 	st->tl = 0;
+
+	tmcnt = 0;
+	pfd.revents = 0;
+	sysret = poll(&pfd, 1, 3000);
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
+	if (unlikely(sysret == 0)) {
+		fprintf(stderr, "Timeout waiting for client!\n");
+		return 255;
+	} else if (unlikely(sysret == -1)) {
+		fprintf(stderr, "poll error when waiting for client: %s\n",
+				strerror(errno));
+		return -errno;
+	} else if ((pfd.revents & POLLIN) == 0) {
+			fprintf(stderr, LinkErr);
+			return -254;
+	}
 	do {
+		stop_flag = check_ring(opt, st, rxr, wparam->mark_value);
+		if (stop_flag)
+			break;
 		pfd.revents = 0;
 		sysret = poll(&pfd, 1, 300);
 		if (unlikely(sysret == 0)) {
 			if (*thinf->stop)
 				break;
 			fprintf(stderr, Timeout);
-			retv = 255;
-			break;
+			tmcnt += 1;
 		} else if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, PollFail, strerror(errno));
@@ -669,11 +685,13 @@ static int recv_bulk(struct thread_info *thinf)
 			fprintf(stderr, LinkErr);
 			retv = -254;
 			break;
-		}
-		stop_flag = check_ring(opt, st, rxr, wparam->mark_value);
-	} while (stop_flag == 0 && global_exit == 0 && *thinf->stop == 0);
+		} else
+			tmcnt = 0;
+	} while (global_exit == 0 && *thinf->stop == 0 && tmcnt < 2);
 	if (stop_flag)
 		*thinf->stop = 1;
+	if (tmcnt == 2)
+		retv = 255;
 	pfd.revents = 0;
 	sysret = poll(&pfd, 1, 200);
 	if (sysret > 0)
@@ -1213,7 +1231,7 @@ static int do_client(struct worker_params *wparam)
 	ready = 0;
 	do {
 		pfd.revents = 0;
-		sysret = poll(&pfd, 1, 500);
+		sysret = poll(&pfd, 1, 1000);
 		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, "poll failed: %s\n",
@@ -1228,12 +1246,13 @@ static int do_client(struct worker_params *wparam)
 		payload = udp_payload(wparam->buf, sysret);
 		if (payload && ipkt->mark == htonl(wparam->mark_value) && 
 				ipkt->msgtyp == htonl(V_RECV_READY))
-			ready = 1;
-	} while (count < 10 && ready == 0);
+			ready += 1;
+	} while (count == 0);
 	if (unlikely(ready == 0)) {
 		fprintf(stderr, "Timeout when waiting for ready signal\n");
 		return 255;
 	}
+	printf("Number of receiving threads: %d\n", ready);
 
 	retv = send_bulk(wparam, &peer);
 
