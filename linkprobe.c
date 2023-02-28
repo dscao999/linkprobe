@@ -38,6 +38,9 @@
 
 #define READ_ONCE(x)	*(volatile typeof(x) *)&(x)
 
+#define POLL_TIME	250
+#define POLL_CNT	4
+
 int verbose = 0;
 
 static volatile int global_exit = 0;
@@ -590,7 +593,7 @@ static void *receive_drain(void *arg)
 	payload = NULL;
 	do {
 		pfd.revents = 0;
-		sysret = poll(&pfd, 1, 200);
+		sysret = poll(&pfd, 1, POLL_TIME);
 		if (sysret == 0)
 			continue;
 		if (sysret == -1) {
@@ -616,15 +619,13 @@ static void *receive_drain(void *arg)
 			printf("Foreign UDP packet. Source port: %hu, Dest " \
 					"port: %hu\n", ntohs(pkt->udph.source),
 					ntohs(pkt->udph.dest));
+		} else if (pkt->msgtyp == htonl(V_END_TEST)) {
+			res = strchr(payload, ' ');
+			sscanf(res, "%lu %u", &total_bytes, &usecs);
+			*thinf->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
+			printf("End Test received by receive drain\n");
 		}
 	} while (*thinf->stop == 0 && global_exit == 0);
-	if (payload && pkt->mark == htonl(wparam->mark_value) &&
-				pkt->msgtyp == htonl(V_END_TEST)) {
-		res = strchr(payload, ' ');
-		sscanf(res, "%lu %u", &total_bytes, &usecs);
-		*thinf->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
-		printf("End Test received by receive drain\n");
-	}
 	free(buf);
 	thinf->running = 0;
 	return (void *)((long)retv);
@@ -643,7 +644,6 @@ static int recv_bulk(struct thread_info *thinf)
 
 	pfd.fd = wparam->sock;
 	pfd.events = POLLIN;
-	retv = 0;
 	st->gcnt = 0;
 	st->bcnt = 0;
 	st->gn = 0;
@@ -651,31 +651,32 @@ static int recv_bulk(struct thread_info *thinf)
 	st->tl = 0;
 
 	tmcnt = 0;
-	pfd.revents = 0;
-	sysret = poll(&pfd, 1, 3000);
-	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
-	if (unlikely(sysret == 0)) {
-		fprintf(stderr, "Timeout waiting for client!\n");
-		return 255;
-	} else if (unlikely(sysret == -1)) {
-		fprintf(stderr, "poll error when waiting for client: %s\n",
-				strerror(errno));
-		return -errno;
-	} else if ((pfd.revents & POLLIN) == 0) {
-			fprintf(stderr, LinkErr);
-			return -254;
-	}
+	retv = 0;
 	do {
-		stop_flag = check_ring(opt, st, rxr, wparam->mark_value);
-		if (stop_flag)
-			break;
 		pfd.revents = 0;
-		sysret = poll(&pfd, 1, 300);
+		sysret = poll(&pfd, 1, 5000);
+		clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
 		if (unlikely(sysret == 0)) {
-			if (*thinf->stop)
+			fprintf(stderr, "Timeout waiting for client!\n");
+			return 255;
+		} else if (unlikely(sysret == -1)) {
+			fprintf(stderr, "poll error when waiting for client: %s\n",
+					strerror(errno));
+			return -errno;
+		} else if ((pfd.revents & POLLIN) == 0) {
+			fprintf(stderr, "Link error when waiting for client!\n");
+			return -254;
+		}
+		stop_flag = check_ring(opt, st, rxr, wparam->mark_value);
+	} while (st->gcnt == 0);
+	do {
+		pfd.revents = 0;
+		sysret = poll(&pfd, 1, POLL_TIME);
+		if (unlikely(sysret == 0)) {
+			if (*thinf->stop || stop_flag)
 				break;
-			fprintf(stderr, Timeout);
 			tmcnt += 1;
+			continue;
 		} else if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, PollFail, strerror(errno));
@@ -685,15 +686,16 @@ static int recv_bulk(struct thread_info *thinf)
 			fprintf(stderr, LinkErr);
 			retv = -254;
 			break;
-		} else
-			tmcnt = 0;
-	} while (global_exit == 0 && *thinf->stop == 0 && tmcnt < 2);
+		}
+		stop_flag = check_ring(opt, st, rxr, wparam->mark_value);
+	} while (stop_flag == 0 && global_exit == 0 && *thinf->stop == 0 &&
+			tmcnt < POLL_CNT);
 	if (stop_flag)
 		*thinf->stop = 1;
-	if (tmcnt == 2)
+	if (tmcnt == POLL_CNT)
 		retv = 255;
 	pfd.revents = 0;
-	sysret = poll(&pfd, 1, 200);
+	sysret = poll(&pfd, 1, 0);
 	if (sysret > 0)
 		check_ring(opt, st, rxr, wparam->mark_value);
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
@@ -944,7 +946,6 @@ static int do_server(struct worker_params *wparam)
 			thinf->wparam.pinf = wparam->pinf;
 			thinf->wparam.mark_value = wparam->mark_value;
 			thinf->stop = &stop;
-			thinf->running = -1;
 			thinf->peer = &peer;
 			thinf->wparam.sock = init_sock(&thinf->wparam, 1, 1);
 			if (unlikely(thinf->wparam.sock < 0)) {
@@ -1005,6 +1006,7 @@ static int do_server(struct worker_params *wparam)
 	return retv;
 
 err_exit_50:
+	sleep(1);
 	for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
 		if (thinf->running != -1) {
 			pthread_cancel(thinf->thid);
@@ -1190,7 +1192,7 @@ static int do_client(struct worker_params *wparam)
 		}
 		retv = 0;
 		pfd.revents = 0;
-		sysret = poll(&pfd, 1, 500);
+		sysret = poll(&pfd, 1, POLL_TIME);
 		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, "poll failed: %s\n",
@@ -1213,8 +1215,8 @@ static int do_client(struct worker_params *wparam)
 		if (payload && ipkt->msgtyp == htonl(V_PROBE_ACK) &&
 				ipkt->mark == htonl(wparam->mark_value))
 			break;
-	} while (global_exit == 0 && count < 10);
-	if (count == 10)
+	} while (global_exit == 0 && count < POLL_CNT);
+	if (count == POLL_CNT)
 		retv = 255;
 	if (retv == 0)
 		printf("Link OK: ");
@@ -1231,7 +1233,7 @@ static int do_client(struct worker_params *wparam)
 	ready = 0;
 	do {
 		pfd.revents = 0;
-		sysret = poll(&pfd, 1, 1000);
+		sysret = poll(&pfd, 1, POLL_TIME);
 		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, "poll failed: %s\n",
@@ -1247,8 +1249,8 @@ static int do_client(struct worker_params *wparam)
 		if (payload && ipkt->mark == htonl(wparam->mark_value) && 
 				ipkt->msgtyp == htonl(V_RECV_READY))
 			ready += 1;
-	} while (count == 0);
-	if (unlikely(ready == 0)) {
+	} while (count < POLL_CNT);
+	if (unlikely(count == POLL_CNT)) {
 		fprintf(stderr, "Timeout when waiting for ready signal\n");
 		return 255;
 	}
@@ -1389,7 +1391,7 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 	pkt = (struct ip_packet *)wparam->buf;
 	do {
 		pfd.revents = 0;
-		sysret = poll(&pfd, 1, 200);
+		sysret = poll(&pfd, 1, POLL_TIME);
 		if (unlikely(sysret == 0)) {
 			count += 1;
 			continue;
@@ -1422,10 +1424,10 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 					ntohs(pkt->udph.dest));
 		} else
 			printf("Foreign non UDP packet.\n");
-	} while (count < 10 && global_exit == 0);
-	if (count == 10)
+	} while (count < POLL_CNT && global_exit == 0);
+	if (count == POLL_CNT) {
 		retv = 255;
-	if (retv != 0) {
+		fprintf(stderr, "Waiting for V_END_TEST. ");
 		fprintf(stderr, Timeout);
 		goto exit_20;
 	}
