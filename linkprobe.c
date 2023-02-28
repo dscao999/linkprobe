@@ -116,6 +116,16 @@ struct proc_info {
 	const struct cmdopts *opt;
 };
 
+struct drain_thread {
+	const struct proc_info *pinf;
+	volatile double *bandwidth;
+	pthread_t thid;
+	volatile int *stop;
+	volatile int running;
+	int sock;
+	int mark_value;
+};
+
 struct worker_params {
 	const struct proc_info *pinf;
 	int sock;
@@ -568,7 +578,7 @@ static int check_ring(const struct cmdopts *opt, struct statistics *st,
 
 static void *receive_drain(void *arg)
 {
-	struct thread_info *thinf = (struct thread_info *)arg;
+	struct drain_thread *drain = (struct drain_thread *)arg;
 	struct pollfd pfd;
 	int sysret, buflen, retv;
 	const char *payload, *res;
@@ -576,11 +586,10 @@ static void *receive_drain(void *arg)
 	unsigned long total_bytes;
 	unsigned int usecs;
 	struct ip_packet *pkt;
-	struct worker_params *wparam = &thinf->wparam;
-	const struct proc_info *pinf = wparam->pinf;
+	const struct proc_info *pinf = drain->pinf;
 
 	retv = 0;
-	thinf->running = 1;
+	drain->running = 1;
 	buflen = pinf->buflen;
 	buf = malloc(buflen);
 	if (!buf) {
@@ -588,7 +597,7 @@ static void *receive_drain(void *arg)
 		return NULL;
 	}
 	pkt = (struct ip_packet *)buf;
-	pfd.fd = wparam->sock;
+	pfd.fd = drain->sock;
 	pfd.events = POLLIN;
 	payload = NULL;
 	do {
@@ -604,7 +613,7 @@ static void *receive_drain(void *arg)
 			break;
 		}
 		payload = NULL;
-		sysret = recv(wparam->sock, buf, buflen, 0);
+		sysret = recv(drain->sock, buf, buflen, 0);
 		if (sysret == -1) {
 			if (errno != EINTR)
 				fprintf(stderr, "recvfrom failed: %s\n",
@@ -615,19 +624,19 @@ static void *receive_drain(void *arg)
 		payload = udp_payload(buf, sysret);
 		if (!payload)
 			printf("foreign non UDP packet. Length: %d\n", sysret);
-		else if (pkt->mark != htonl(wparam->mark_value)){
+		else if (pkt->mark != htonl(drain->mark_value)){
 			printf("Foreign UDP packet. Source port: %hu, Dest " \
 					"port: %hu\n", ntohs(pkt->udph.source),
 					ntohs(pkt->udph.dest));
 		} else if (pkt->msgtyp == htonl(V_END_TEST)) {
 			res = strchr(payload, ' ');
 			sscanf(res, "%lu %u", &total_bytes, &usecs);
-			*thinf->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
+			*drain->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
 			printf("End Test received by receive drain\n");
 		}
-	} while (*thinf->stop == 0 && global_exit == 0);
+	} while (*drain->stop == 0 && global_exit == 0);
 	free(buf);
-	thinf->running = 0;
+	drain->running = 0;
 	return (void *)((long)retv);
 }
 
@@ -1279,6 +1288,7 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 	const struct proc_info *pinf = wparam->pinf;
 	const struct cmdopts *opt = pinf->opt;
 	struct thread_info thinf;
+	struct drain_thread drain;
 
 	speed = -1.0;
 	retv = 0;
@@ -1321,6 +1331,16 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 		goto exit_10;
 	}
 	finish_up = 0;
+	drain.sock = wparam->sock;
+	drain.pinf = wparam->pinf;
+	drain.running = -1;
+	drain.bandwidth = &speed;
+	drain.stop = &finish_up;
+	drain.mark_value = wparam->mark_value;
+	sysret = pthread_create(&thinf.thid, NULL, receive_drain, &drain);
+	if (unlikely(sysret != 0))
+		fprintf(stderr, "Warning! Cannot create drain thread: %s\n",
+			strerror(sysret));
 	memset(&thinf, 0, sizeof(thinf));
 	thinf.wparam.pinf = wparam->pinf;
 	thinf.wparam.sock = wparam->sock;
@@ -1335,10 +1355,6 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 	thinf.prec.saddr = c_saddr;
 	thinf.prec.daddr = c_daddr;
 	thinf.prec.pkts = 0;
-	sysret = pthread_create(&thinf.thid, NULL, receive_drain, &thinf);
-	if (unlikely(sysret != 0))
-		fprintf(stderr, "Warning! Cannot create drain thread: %s\n",
-			strerror(sysret));
 	count = 0;
 	pkt = (struct ip_packet *)wparam->buf;
 	pkt->mark = htonl(wparam->mark_value);
