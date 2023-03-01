@@ -717,7 +717,8 @@ static int recv_bulk(struct thread_info *thinf)
 	return retv;
 }
 
-static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *peer);
+static int send_bulk(struct worker_params *wparam, struct packet_record *prec,
+		const struct sockaddr_ll *peer);
 static int do_client(struct worker_params *wparam);
 
 static int create_sock(const struct cmdopts *opt)
@@ -1273,12 +1274,20 @@ static int do_client(struct worker_params *wparam)
 	}
 	printf("Number of receiving threads: %d\n", ready);
 
-	retv = send_bulk(wparam, &peer);
+	struct packet_record prec;
+
+	prec.sport = c_sport;
+	prec.dport = c_dport;
+	prec.saddr = c_saddr;
+	prec.daddr = c_daddr;
+	prec.pkts = 0;
+	retv = send_bulk(wparam, &prec, &peer);
 
 	return retv;
 }
 
-static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *peer)
+static int send_bulk(struct worker_params *wparam, struct packet_record *prec,
+		const struct sockaddr_ll *peer)
 {
 	int retv, buflen, off, len, sysret;
 	long count, telapsed;
@@ -1295,7 +1304,6 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 	volatile double speed;
 	const struct proc_info *pinf = wparam->pinf;
 	const struct cmdopts *opt = pinf->opt;
-	struct thread_info thinf;
 	struct drain_thread drain;
 
 	speed = -1.0;
@@ -1349,20 +1357,6 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 	if (unlikely(sysret != 0))
 		fprintf(stderr, "Warning! Cannot create drain thread: %s\n",
 			strerror(sysret));
-	memset(&thinf, 0, sizeof(thinf));
-	thinf.wparam.pinf = wparam->pinf;
-	thinf.wparam.sock = wparam->sock;
-	thinf.wparam.mark_value = wparam->mark_value;
-	thinf.wparam.buf = NULL;
-	thinf.wparam.rxr.ring = NULL;
-	thinf.stop = &finish_up;
-	thinf.running = -1;
-	thinf.bandwidth = &speed;
-	thinf.prec.sport = c_sport;
-	thinf.prec.dport = c_dport;
-	thinf.prec.saddr = c_saddr;
-	thinf.prec.daddr = c_daddr;
-	thinf.prec.pkts = 0;
 	count = 0;
 	pkt = (struct ip_packet *)wparam->buf;
 	pkt->mark = htonl(wparam->mark_value);
@@ -1379,7 +1373,7 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 	do {
 		*(long *)(pkt->payload) = random();
 		pkt->seq = count;
-		len = prepare_udp(wparam->buf, pinf->mtu, NULL, 1, &thinf.prec, &opt->hdinc);
+		len = prepare_udp(wparam->buf, pinf->mtu, NULL, 1, prec, &opt->hdinc);
 		sysret = sendto(wparam->sock, wparam->buf, len, 0,
 				(struct sockaddr *)peer, sizeof(*peer));
 		if (unlikely(sysret == -1)) {
@@ -1392,7 +1386,7 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 		count += 1;
 	} while (finish_up == 0 && global_exit == 0);
 	pkt->msgtyp = htonl(V_LAST_PACKET);
-	len = prepare_udp(wparam->buf, pinf->mtu, LAST_PACKET, 1, &thinf.prec, &opt->hdinc);
+	len = prepare_udp(wparam->buf, pinf->mtu, LAST_PACKET, 1, prec, &opt->hdinc);
 	sysret = sendto(wparam->sock, wparam->buf, len, 0, 
 			(struct sockaddr *)peer, sizeof(*peer));
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
