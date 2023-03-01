@@ -137,12 +137,13 @@ struct worker_params {
 struct thread_info {
 	pthread_t thid;
 	volatile double *bandwidth;
-	volatile int running;
 	volatile int *stop;
 	struct packet_record prec;
 	struct worker_params wparam;
 	struct statistics st;
 	const struct sockaddr_ll *peer;
+	volatile int running;
+	int numths;
 };
 
 static int getmtu(int ifindex)
@@ -845,22 +846,24 @@ static void * recv_horse(void *arg)
 	struct worker_params *wparam = &thinf->wparam;
 	const struct proc_info *pinf = wparam->pinf;
 	int retv, len, sysret;
-	char *buf;
+	char *buf, *mesg;
 	struct ip_packet *ipkt;
 	const struct sockaddr_ll *peer;
 
-	buf = malloc(pinf->buflen);
+	buf = malloc(pinf->buflen+128);
 	if (unlikely(buf == NULL)) {
 		fprintf(stderr, "Out of Memory");
 		retv = -ENOMEM;
 		goto exit_10;
 	}
+	mesg = buf + pinf->buflen;
 	thinf->running = 1;
 	ipkt = (struct ip_packet *)buf;
 	ipkt->mark = htonl(wparam->mark_value);
 	ipkt->msgtyp = htonl(V_RECV_READY);
 	peer = thinf->peer;
-	len = prepare_udp(buf, pinf->mtu, RECV_READY, 0, NULL, NULL);
+	sprintf(mesg, "%d %s", thinf->numths, RECV_READY);
+	len = prepare_udp(buf, pinf->mtu, mesg, 0, NULL, NULL);
 	sysret = sendto(wparam->sock, buf, len, 0,
 			(const struct sockaddr *)peer, sizeof(*peer));
 	free(buf);
@@ -949,6 +952,7 @@ static int do_server(struct worker_params *wparam)
 		for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
 			thinf->running = -1;
 			thinf->wparam.sock = -1;
+			thinf->numths = numths;
 		}
 		stop = 0;
 		for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
@@ -1157,7 +1161,7 @@ static int do_client(struct worker_params *wparam)
 	const struct cmdopts *opt = pinf->opt;
 	const char *payload;
 	struct pollfd pfd;
-	int retv, len, sysret, count, ready;
+	int retv, len, sysret, count, ready, numths;
 	char *mesg;
 	struct timespec tm;
 	struct ip_packet *ipkt;
@@ -1238,6 +1242,7 @@ static int do_client(struct worker_params *wparam)
 	if (retv != 0 || opt->probe_only)
 		return retv;
 
+	numths = -1;
 	count = 0;
 	ready = 0;
 	do {
@@ -1256,9 +1261,12 @@ static int do_client(struct worker_params *wparam)
 		sysret = recv(wparam->sock, wparam->buf, pinf->buflen, 0);
 		payload = udp_payload(wparam->buf, sysret);
 		if (payload && ipkt->mark == htonl(wparam->mark_value) && 
-				ipkt->msgtyp == htonl(V_RECV_READY))
+				ipkt->msgtyp == htonl(V_RECV_READY)) {
 			ready += 1;
-	} while (count < POLL_CNT);
+			if (numths == -1)
+				numths = atoi(payload);
+		}
+	} while (count < POLL_CNT && (numths == -1 || ready < numths));
 	if (unlikely(count == POLL_CNT)) {
 		fprintf(stderr, "Timeout when waiting for ready signal\n");
 		return 255;
