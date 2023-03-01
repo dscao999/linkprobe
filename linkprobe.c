@@ -1337,7 +1337,7 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 	drain.bandwidth = &speed;
 	drain.stop = &finish_up;
 	drain.mark_value = wparam->mark_value;
-	sysret = pthread_create(&thinf.thid, NULL, receive_drain, &drain);
+	sysret = pthread_create(&drain.thid, NULL, receive_drain, &drain);
 	if (unlikely(sysret != 0))
 		fprintf(stderr, "Warning! Cannot create drain thread: %s\n",
 			strerror(sysret));
@@ -1400,8 +1400,8 @@ static int send_bulk(struct worker_params *wparam, const struct sockaddr_ll *pee
 	pfd.events = POLLIN;
 	count = 0;
 	payload = NULL;
-	if (thinf.running != -1)
-		pthread_join(thinf.thid, NULL);
+	if (drain.running != -1)
+		pthread_join(drain.thid, NULL);
 	if (speed != -1.0)
 		goto exit_30;
 	pkt = (struct ip_packet *)wparam->buf;
