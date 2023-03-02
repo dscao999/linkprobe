@@ -146,6 +146,16 @@ struct thread_info {
 	int numths;
 };
 
+struct send_thread {
+	pthread_t thid;
+	volatile double *bandwidth;
+	volatile int *stop;
+	struct packet_record prec;
+	struct worker_params wparam;
+	const struct sockaddr_ll *peer;
+	volatile int running;
+};
+
 static int getmtu(int ifindex)
 {
 	struct ifreq mreq;
@@ -717,8 +727,7 @@ static int recv_bulk(struct thread_info *thinf)
 	return retv;
 }
 
-static int send_bulk(struct worker_params *wparam, struct packet_record *prec,
-		const struct sockaddr_ll *peer);
+static int send_bulk(struct send_thread *thinf);
 static int do_client(struct worker_params *wparam);
 
 static int create_sock(const struct cmdopts *opt)
@@ -836,7 +845,10 @@ static inline void close_sock(struct worker_params *wparam)
 		free(wparam->buf);
 		wparam->buf = NULL;
 	}
-	close(wparam->sock);
+	if (wparam->sock != -1) {
+		close(wparam->sock);
+		wparam->sock = -1;
+	}
 }
 
 const char RECV_READY[] = "Receive ready";
@@ -1273,22 +1285,31 @@ static int do_client(struct worker_params *wparam)
 		return 255;
 	}
 	printf("Number of receiving threads: %d\n", ready);
+	close_sock(wparam);
 
-	struct packet_record prec;
+	struct send_thread thinf;
 
-	prec.sport = c_sport;
-	prec.dport = c_dport;
-	prec.saddr = c_saddr;
-	prec.daddr = c_daddr;
-	prec.pkts = 0;
-	retv = send_bulk(wparam, &prec, &peer);
+	thinf.prec.sport = c_sport;
+	thinf.prec.dport = c_dport;
+	thinf.prec.saddr = c_saddr;
+	thinf.prec.daddr = c_daddr;
+	thinf.prec.pkts = 0;
+	thinf.peer = &peer;
+	thinf.wparam.pinf = pinf;
+	thinf.wparam.mark_value = wparam->mark_value;
+	thinf.wparam.sock = init_sock(&thinf.wparam, 0, 1);
+	assert(thinf.wparam.sock != -1);
+
+	retv = send_bulk(&thinf);
 
 	return retv;
 }
 
-static int send_bulk(struct worker_params *wparam, struct packet_record *prec,
-		const struct sockaddr_ll *peer)
+static int send_bulk(struct send_thread *thinf)
 {
+	struct worker_params *wparam = &thinf->wparam;
+	struct packet_record *prec = &thinf->prec;
+	const struct sockaddr_ll *peer = thinf->peer;
 	int retv, buflen, off, len, sysret;
 	long count, telapsed;
 	FILE *fin;
