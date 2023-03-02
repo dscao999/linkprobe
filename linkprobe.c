@@ -1286,20 +1286,27 @@ static int do_client(struct worker_params *wparam)
 	close_sock(wparam);
 
 	struct send_thread thinf;
+	double speed;
 
-	thinf.prec.sport = c_sport;
+	speed = -1.0;
+	finish_up = 0;
+	thinf.bandwidth = &speed;
+	thinf.stop = &finish_up;
+	thinf.prec.sport = c_sport + (random() & 0x0ff);
 	thinf.prec.dport = c_dport;
 	thinf.prec.saddr = c_saddr;
 	thinf.prec.daddr = c_daddr;
 	thinf.prec.pkts = 0;
-	thinf.peer = &peer;
 	thinf.wparam.pinf = pinf;
 	thinf.wparam.mark_value = wparam->mark_value;
 	thinf.wparam.sock = init_sock(&thinf.wparam, 0, 1);
 	assert(thinf.wparam.sock != -1);
+	thinf.peer = &peer;
+	thinf.running = -1;
 
 	retv = send_bulk(&thinf);
 
+	close_sock(&thinf.wparam);
 	return retv;
 }
 
@@ -1308,7 +1315,7 @@ static int send_bulk(struct send_thread *thinf)
 	struct worker_params *wparam = &thinf->wparam;
 	struct packet_record *prec = &thinf->prec;
 	const struct sockaddr_ll *peer = thinf->peer;
-	int retv, buflen, off, len, sysret;
+	int retv, buflen, off, len, sysret, last;
 	long count, telapsed;
 	FILE *fin;
 	struct sigaction sact, oact;
@@ -1320,12 +1327,10 @@ static int send_bulk(struct send_thread *thinf)
 	struct timespec tm0, tm1;
 	struct pollfd pfd;
 	struct ip_packet *pkt;
-	volatile double speed;
 	const struct proc_info *pinf = wparam->pinf;
 	const struct cmdopts *opt = pinf->opt;
 	struct drain_thread drain;
 
-	speed = -1.0;
 	retv = 0;
 	fin = fopen("/dev/urandom", "rb");
 	if (unlikely(!fin)) {
@@ -1365,21 +1370,19 @@ static int send_bulk(struct send_thread *thinf)
 		retv = errno;
 		goto exit_10;
 	}
-	finish_up = 0;
 	drain.sock = wparam->sock;
 	drain.pinf = wparam->pinf;
 	drain.running = -1;
-	drain.bandwidth = &speed;
-	drain.stop = &finish_up;
+	drain.bandwidth = thinf->bandwidth;
+	drain.stop = thinf->stop;
 	drain.mark_value = wparam->mark_value;
 	sysret = pthread_create(&drain.thid, NULL, receive_drain, &drain);
-	if (unlikely(sysret != 0))
+	if (unlikely(sysret != 0)) {
 		fprintf(stderr, "Warning! Cannot create drain thread: %s\n",
 			strerror(sysret));
-	count = 0;
-	pkt = (struct ip_packet *)wparam->buf;
-	pkt->mark = htonl(wparam->mark_value);
-	pkt->msgtyp = htonl(V_BULK);
+		retv = -sysret;
+		goto exit_20;
+	}
 	memset(&itm, 0, sizeof(itm));
 	itm.it_value.tv_sec = opt->duration;
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
@@ -1387,8 +1390,12 @@ static int send_bulk(struct send_thread *thinf)
 	if (unlikely(sysret == -1)) {
 		fprintf(stderr, "Cannot arm timer: %s\n", strerror(errno));
 		retv = errno;
-		goto exit_20;
+		goto exit_30;
 	}
+	count = 0;
+	pkt = (struct ip_packet *)wparam->buf;
+	pkt->mark = htonl(wparam->mark_value);
+	pkt->msgtyp = htonl(V_BULK);
 	do {
 		*(long *)(pkt->payload) = random();
 		pkt->seq = count;
@@ -1400,7 +1407,7 @@ static int send_bulk(struct send_thread *thinf)
 				fprintf(stderr, "Send failed: %s\n",
 						strerror(errno));
 			retv = -errno;
-			goto exit_20;
+			goto exit_30;
 		}
 		count += 1;
 	} while (finish_up == 0 && global_exit == 0);
@@ -1412,19 +1419,19 @@ static int send_bulk(struct send_thread *thinf)
 	if (unlikely(sysret == -1)) {
 		fprintf(stderr, "Send failed: %s\n", strerror(errno));
 		retv = -errno;
-		goto exit_20;
+		goto exit_30;
 	}
 	count += 1;
 	telapsed = tm_elapsed(&tm0, &tm1) / 1000;
 	printf("Total %ld packets sent in %ld milliseconds\n", count, telapsed);
+
+	int tmout_cnt = 0;
+
 	pfd.fd = wparam->sock;
 	pfd.events = POLLIN;
 	count = 0;
 	payload = NULL;
-	if (drain.running != -1)
-		pthread_join(drain.thid, NULL);
-	if (speed != -1.0)
-		goto exit_30;
+	last = 0;
 	pkt = (struct ip_packet *)wparam->buf;
 	do {
 		pfd.revents = 0;
@@ -1454,32 +1461,37 @@ static int send_bulk(struct send_thread *thinf)
 		payload = udp_payload(wparam->buf, sysret);
 		if (payload) {
 			if (pkt->mark == htonl(wparam->mark_value) &&
-					pkt->msgtyp == htonl(V_END_TEST))
+					pkt->msgtyp == htonl(V_END_TEST)) {
+				last = 1;
 				break;
+			}
 			printf("Foreign UDP packet. Source port: %hu, Dest " \
 					"port: %hu\n", ntohs(pkt->udph.source),
 					ntohs(pkt->udph.dest));
 		} else
 			printf("Foreign non UDP packet.\n");
-	} while (count < POLL_CNT && global_exit == 0);
-	if (count == POLL_CNT) {
+		tmout_cnt += 1;
+	} while (*thinf->bandwidth == -1.0 && count < POLL_CNT &&
+			global_exit == 0 && tmout_cnt < 100);
+	if (last) {
+		unsigned long total_bytes;
+		unsigned int usecs;
+
+		res = payload;
+		res = strchr(res, ' ');
+		sscanf(res, "%lu %u", &total_bytes, &usecs);
+		*thinf->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
+		printf("Speed: %18.2f bytes/s\n", *thinf->bandwidth);
+	} else if (*thinf->bandwidth == -1.0) {
 		retv = 255;
 		fprintf(stderr, "Waiting for V_END_TEST. ");
 		fprintf(stderr, Timeout);
-		goto exit_20;
 	}
 
-	unsigned long total_bytes;
-	unsigned int usecs;
-
-	res = payload;
-	res = strchr(res, ' ');
-	sscanf(res, "%lu %u", &total_bytes, &usecs);
-	speed = ((double)total_bytes) / (((double)usecs) / 1000000);
 
 exit_30:
-	printf("Speed: %18.2f bytes/s\n", speed);
-
+	*thinf->stop = 1;
+	pthread_join(drain.thid, NULL);
 exit_20:
 	timer_delete(tmid);
 exit_10:
