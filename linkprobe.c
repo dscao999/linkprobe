@@ -1285,11 +1285,34 @@ static int do_client(struct worker_params *wparam)
 	printf("Number of receiving threads: %d\n", ready);
 	close_sock(wparam);
 
+	struct sigaction sact, oact;
+	timer_t tmid;
+	struct sigevent sevent;
+	struct itimerspec itm;
+
+	memset(&sact, 0, sizeof(sact));
+	sact.sa_handler = sig_handler;
+	if (sigaction(SIGALRM, &sact, &oact) == -1) {
+		fprintf(stderr, "Cannot install handler for SIGALRM: %s\n",
+				strerror(errno));
+		return errno;
+	}
+	memset(&sevent, 0, sizeof(sevent));
+	sevent.sigev_notify = SIGEV_SIGNAL;
+	sevent.sigev_signo = SIGALRM;
+	sysret = timer_create(CLOCK_MONOTONIC, &sevent, &tmid);
+	if (unlikely(sysret == -1)) {
+		fprintf(stderr, "Cannot create timer: %s\n", strerror(errno));
+		retv = errno;
+		goto exit_10;
+	}
+
 	struct send_thread thinf;
 	double speed;
 
 	speed = -1.0;
 	finish_up = 0;
+
 	thinf.bandwidth = &speed;
 	thinf.stop = &finish_up;
 	thinf.prec.sport = c_sport + (random() & 0x0ff);
@@ -1304,9 +1327,23 @@ static int do_client(struct worker_params *wparam)
 	thinf.peer = &peer;
 	thinf.running = -1;
 
+	memset(&itm, 0, sizeof(itm));
+	itm.it_value.tv_sec = opt->duration;
+	sysret = timer_settime(tmid, 0, &itm, NULL);
+	if (unlikely(sysret == -1)) {
+		fprintf(stderr, "Cannot arm timer: %s\n", strerror(errno));
+		retv = errno;
+		goto exit_20;
+	}
+
 	retv = send_bulk(&thinf);
 
 	close_sock(&thinf.wparam);
+
+exit_20:
+	timer_delete(tmid);
+exit_10:
+	sigaction(SIGALRM, &oact, NULL);
 	return retv;
 }
 
@@ -1318,10 +1355,6 @@ static int send_bulk(struct send_thread *thinf)
 	int retv, buflen, off, len, sysret, last;
 	long count, telapsed;
 	FILE *fin;
-	struct sigaction sact, oact;
-	timer_t tmid;
-	struct sigevent sevent;
-	struct itimerspec itm;
 	const char *payload;
 	const char *res;
 	struct timespec tm0, tm1;
@@ -1354,22 +1387,6 @@ static int send_bulk(struct send_thread *thinf)
 	} while (buflen > 0);
 	fclose(fin);
 
-	memset(&sact, 0, sizeof(sact));
-	sact.sa_handler = sig_handler;
-	if (sigaction(SIGALRM, &sact, &oact) == -1) {
-		fprintf(stderr, "Cannot install handler for SIGALRM: %s\n",
-				strerror(errno));
-		return errno;
-	}
-	memset(&sevent, 0, sizeof(sevent));
-	sevent.sigev_notify = SIGEV_SIGNAL;
-	sevent.sigev_signo = SIGALRM;
-	sysret = timer_create(CLOCK_MONOTONIC, &sevent, &tmid);
-	if (unlikely(sysret == -1)) {
-		fprintf(stderr, "Cannot create timer: %s\n", strerror(errno));
-		retv = errno;
-		goto exit_10;
-	}
 	drain.sock = wparam->sock;
 	drain.pinf = wparam->pinf;
 	drain.running = -1;
@@ -1380,22 +1397,13 @@ static int send_bulk(struct send_thread *thinf)
 	if (unlikely(sysret != 0)) {
 		fprintf(stderr, "Warning! Cannot create drain thread: %s\n",
 			strerror(sysret));
-		retv = -sysret;
-		goto exit_20;
-	}
-	memset(&itm, 0, sizeof(itm));
-	itm.it_value.tv_sec = opt->duration;
-	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
-	sysret = timer_settime(tmid, 0, &itm, NULL);
-	if (unlikely(sysret == -1)) {
-		fprintf(stderr, "Cannot arm timer: %s\n", strerror(errno));
-		retv = errno;
-		goto exit_30;
+		return -sysret;
 	}
 	count = 0;
 	pkt = (struct ip_packet *)wparam->buf;
 	pkt->mark = htonl(wparam->mark_value);
 	pkt->msgtyp = htonl(V_BULK);
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
 	do {
 		*(long *)(pkt->payload) = random();
 		pkt->seq = count;
@@ -1407,7 +1415,7 @@ static int send_bulk(struct send_thread *thinf)
 				fprintf(stderr, "Send failed: %s\n",
 						strerror(errno));
 			retv = -errno;
-			goto exit_30;
+			goto exit_10;
 		}
 		count += 1;
 	} while (finish_up == 0 && global_exit == 0);
@@ -1419,7 +1427,7 @@ static int send_bulk(struct send_thread *thinf)
 	if (unlikely(sysret == -1)) {
 		fprintf(stderr, "Send failed: %s\n", strerror(errno));
 		retv = -errno;
-		goto exit_30;
+		goto exit_10;
 	}
 	count += 1;
 	telapsed = tm_elapsed(&tm0, &tm1) / 1000;
@@ -1489,14 +1497,8 @@ static int send_bulk(struct send_thread *thinf)
 	}
 
 
-exit_30:
+exit_10:
 	*thinf->stop = 1;
 	pthread_join(drain.thid, NULL);
-exit_20:
-	timer_delete(tmid);
-exit_10:
-	if (sigaction(SIGALRM, &oact, NULL) == -1)
-		fprintf(stderr, "Cannot restore handler for SIGALRM: %s\n",
-				strerror(errno));
 	return retv;
 }
