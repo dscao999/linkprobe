@@ -134,11 +134,9 @@ struct worker_params {
 	struct rx_ring rxr;
 };
 
-struct thread_info {
+struct recv_thread {
 	pthread_t thid;
-	volatile double *bandwidth;
 	volatile int *stop;
-	struct packet_record prec;
 	struct worker_params wparam;
 	struct statistics st;
 	const struct sockaddr_ll *peer;
@@ -651,7 +649,7 @@ static void *receive_drain(void *arg)
 	return (void *)((long)retv);
 }
 
-static int recv_bulk(struct thread_info *thinf)
+static int recv_bulk(struct recv_thread *thinf)
 {
 	struct timespec tm0, tm1;
 	int retv, sysret, stop_flag, tmcnt;
@@ -855,7 +853,7 @@ const char RECV_READY[] = "Receive ready";
 
 static void * recv_horse(void *arg)
 {
-	struct thread_info *thinf = arg;
+	struct recv_thread *thinf = arg;
 	struct worker_params *wparam = &thinf->wparam;
 	const struct proc_info *pinf = wparam->pinf;
 	int retv, len, sysret;
@@ -904,7 +902,7 @@ static int do_server(struct worker_params *wparam)
 	struct ip_packet *ipkt = (struct ip_packet *)wparam->buf;
 	volatile int stop;
 	int numths, i;
-	struct thread_info *thinfs, *thinf;
+	struct recv_thread *thinfs, *thinf;
 	void *thres;
 	struct statistics st;
 
@@ -956,7 +954,7 @@ static int do_server(struct worker_params *wparam)
 		close(wparam->sock);
 
 		numths = opt->numths;
-		thinfs = malloc(sizeof(struct thread_info)*numths);
+		thinfs = malloc(sizeof(struct recv_thread)*numths);
 		if (unlikely(thinfs == NULL)) {
 			fprintf(stderr, "Out of Memory!\n");
 			retv = -ENOMEM;
