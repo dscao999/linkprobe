@@ -301,6 +301,12 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 			.val = 't'
 		},
 		{
+			.name = "verbose",
+			.has_arg = 2,
+			.flag = NULL,
+			.val = 'v'
+		},
+		{
 		}
 	};
 	static const unsigned short defdur = 20;
@@ -319,7 +325,7 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 	fin = 0;
 	opterr = 0;
 	while (fin == 0) {
-		c = getopt_long(argc, argv, ":lpbi:d:a:o:n:f:t:",
+		c = getopt_long(argc, argv, ":lpbi:d:a:o:n:f:t:v::",
 				options, NULL);
 		switch(c) {
 			case -1:
@@ -328,6 +334,12 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 			case '?':
 				fprintf(stderr, "Unknown option %c ignored\n",
 						(char)optopt);
+				break;
+			case 'v':
+				if (optarg)
+					verbose = atoi(optarg);
+				else
+					verbose += 1;
 				break;
 			case ':':
 				fprintf(stderr, "Missing arguments for %c. " \
@@ -722,9 +734,10 @@ static int recv_bulk(struct recv_thread *thinf)
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	st->tl = tm_elapsed(&tm0, &tm1);
 
-	printf("Received %lu packets, %lu bytes, in %u microseconds. %lu " \
-			"foreign packets, %lu foreign bytes\n",
-			st->gcnt, st->gn, st->tl, st->bcnt, st->bn);
+	if (verbose >= 1)
+		printf("Received %lu packets, %lu bytes, in %u microseconds. " \
+				"%lu foreign packets, %lu foreign bytes\n",
+				st->gcnt, st->gn, st->tl, st->bcnt, st->bn);
 	return retv;
 }
 
@@ -1028,6 +1041,9 @@ static int do_server(struct worker_params *wparam)
 			retv = -errno;
 			break;
 		}
+		printf("Total %lu packets received, %lu bytes in %d seconds." \
+				" %lu foreign packets, %lu bytes.\n",
+				st.gcnt, st.gn, st.tl/1000000, st.bcnt, st.bn);
 	}
 
 	return retv;
@@ -1328,6 +1344,7 @@ static int do_client(struct worker_params *wparam)
 	double speed;
 	int i, startup;
 	pthread_mutex_t lmtx;
+	unsigned long pkts = 0;
 
 	pthread_mutex_init(&lmtx, NULL);
 	numths = opt->numths;
@@ -1398,9 +1415,12 @@ exit_30:
 			pthread_join(thinf->thid, NULL);
 		if (thinf->wparam.sock >= 0)
 			close_sock(&thinf->wparam);
+		pkts += thinf->prec.pkts;
 	}
 	free(thinfs);
 	pthread_mutex_destroy(&lmtx);
+	if (startup)
+		printf("%lu packets sent\n", pkts);
 exit_20:
 	timer_delete(tmid);
 exit_10:
@@ -1474,7 +1494,9 @@ static int send_bulk(struct send_thread *thinf)
 	pthread_mutex_unlock(thinf->lmtx);
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	telapsed = tm_elapsed(&tm0, &tm1) / 1000;
-	printf("Total %ld packets sent in %ld milliseconds\n", prec->pkts, telapsed);
+	if (verbose >= 1)
+		printf("Total %ld packets sent in %ld milliseconds\n",
+				prec->pkts, telapsed);
 
 	int tmout_cnt = 0;
 
