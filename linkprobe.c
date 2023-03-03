@@ -722,7 +722,7 @@ static int recv_bulk(struct recv_thread *thinf)
 			tmcnt < POLL_CNT);
 	if (stop_flag)
 		*thinf->stop = 1;
-	if (tmcnt == POLL_CNT)
+	else if (*thinf->stop == 0 && tmcnt == POLL_CNT)
 		retv = 255;
 	pfd.revents = 0;
 	do {
@@ -1027,8 +1027,8 @@ static int do_server(struct worker_params *wparam)
 		assert(wparam->sock >= 0);
 		buf = wparam->buf;
 		mesg = buf + pinf->buflen;
-		len = sprintf(mesg, "%s", END_TEST);
-		sprintf(mesg+len, "%lu %u", st.gn, st.tl);
+		len = sprintf(mesg, "%lu %u ", st.gn, st.tl);
+		len += sprintf(mesg+len, "%s", END_TEST);
 		ipkt->mark = htonl(wparam->mark_value);
 		ipkt->msgtyp = htonl(V_END_TEST);
 		len = prepare_udp(buf, pinf->mtu, mesg, 0, NULL, NULL);
@@ -1436,7 +1436,6 @@ static int send_bulk(struct send_thread *thinf)
 	int retv, len, sysret, last, count;
 	long telapsed;
 	const char *payload;
-	const char *res;
 	struct timespec tm0, tm1;
 	struct pollfd pfd;
 	struct ip_packet *pkt;
@@ -1550,9 +1549,7 @@ static int send_bulk(struct send_thread *thinf)
 		unsigned long total_bytes;
 		unsigned int usecs;
 
-		res = payload;
-		res = strchr(res, ' ');
-		sscanf(res, "%lu %u", &total_bytes, &usecs);
+		sscanf(payload, "%lu %u", &total_bytes, &usecs);
 		*thinf->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
 		printf("Speed: %18.2f bytes/s\n", *thinf->bandwidth);
 	} else if (*thinf->bandwidth == -1.0) {
