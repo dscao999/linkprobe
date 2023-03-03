@@ -1164,6 +1164,18 @@ exit_10:
 	return retv;
 }
 
+static void *send_horse(void *arg)
+{
+	struct send_thread *thinf = arg;
+	int retv;
+
+	thinf->running = 1;
+	retv = send_bulk(thinf);
+	thinf->running = 0;
+
+	return (void *)((long)retv);
+}
+
 static int do_client(struct worker_params *wparam)
 {
 	struct sockaddr_ll peer;
@@ -1288,6 +1300,7 @@ static int do_client(struct worker_params *wparam)
 	timer_t tmid;
 	struct sigevent sevent;
 	struct itimerspec itm;
+	struct timespec stm, remtm;
 
 	memset(&sact, 0, sizeof(sact));
 	sact.sa_handler = sig_handler;
@@ -1306,38 +1319,78 @@ static int do_client(struct worker_params *wparam)
 		goto exit_10;
 	}
 
-	struct send_thread thinf;
+	struct send_thread *thinf, *thinfs;
 	double speed;
+	int i, startup;
 
+	numths = opt->numths;
 	speed = -1.0;
 	finish_up = 0;
-
-	thinf.bandwidth = &speed;
-	thinf.stop = &finish_up;
-	thinf.prec.sport = c_sport + (random() & 0x0ff);
-	thinf.prec.dport = c_dport;
-	thinf.prec.saddr = c_saddr;
-	thinf.prec.daddr = c_daddr;
-	thinf.wparam.pinf = pinf;
-	thinf.wparam.mark_value = wparam->mark_value;
-	thinf.wparam.sock = init_sock(&thinf.wparam, 0, 1);
-	assert(thinf.wparam.sock != -1);
-	thinf.peer = &peer;
-	thinf.running = -1;
-
 	memset(&itm, 0, sizeof(itm));
 	itm.it_value.tv_sec = opt->duration;
+
+	thinfs = malloc(sizeof(struct send_thread)*numths);
+	if (unlikely(thinfs == NULL)) {
+		fprintf(stderr, "Out of Memory!\n");
+		retv = ENOMEM;
+		goto exit_20;
+	}
+	for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
+		thinf->bandwidth = &speed;
+		thinf->stop = &finish_up;
+		thinf->prec.sport = c_sport + (random() & 0x0ff);
+		thinf->prec.dport = c_dport;
+		thinf->prec.saddr = c_saddr;
+		thinf->prec.daddr = c_daddr;
+		thinf->wparam.pinf = pinf;
+		thinf->wparam.mark_value = wparam->mark_value;
+		thinf->peer = &peer;
+		thinf->running = -1;
+		thinf->wparam.sock = -1;
+	}
+	startup = 0;
+	for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
+		thinf->wparam.sock = init_sock(&thinf->wparam, 0, 1);
+		if (unlikely(thinf->wparam.sock < 0)) {
+			retv = thinf->wparam.sock;
+			goto exit_30;
+		}
+		sysret = pthread_create(&thinf->thid, NULL, send_horse, thinf);
+		if (unlikely(sysret != 0)) {
+			fprintf(stderr, "pthread create failed: %s\n",
+					strerror(errno));
+			retv = sysret;
+			goto exit_30;
+		}
+	}
+
 	sysret = timer_settime(tmid, 0, &itm, NULL);
 	if (unlikely(sysret == -1)) {
 		fprintf(stderr, "Cannot arm timer: %s\n", strerror(errno));
 		retv = errno;
-		goto exit_20;
+	} else
+		startup = 1;
+
+
+exit_30:
+	stm.tv_sec = 1;
+	stm.tv_nsec = 0;
+	do {
+		sysret = nanosleep(&stm, &remtm);
+		stm = remtm;
+	} while (sysret == -1 && errno == EINTR);
+	if (!startup) {
+		finish_up = 1;
+		memset(&itm, 0, sizeof(itm));
+		timer_settime(tmid, 0, &itm, NULL);
 	}
-
-	retv = send_bulk(&thinf);
-
-	close_sock(&thinf.wparam);
-
+	for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
+		if (thinf->running != -1)
+			pthread_join(thinf->thid, NULL);
+		if (thinf->wparam.sock >= 0)
+			close_sock(&thinf->wparam);
+	}
+	free(thinfs);
 exit_20:
 	timer_delete(tmid);
 exit_10:
