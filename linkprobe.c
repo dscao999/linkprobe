@@ -1413,9 +1413,8 @@ static int send_bulk(struct send_thread *thinf)
 	struct worker_params *wparam = &thinf->wparam;
 	struct packet_record *prec = &thinf->prec;
 	const struct sockaddr_ll *peer = thinf->peer;
-	int retv, buflen, off, len, sysret, last, count;
+	int retv, len, sysret, last, count;
 	long telapsed;
-	FILE *fin;
 	const char *payload;
 	const char *res;
 	struct timespec tm0, tm1;
@@ -1426,28 +1425,6 @@ static int send_bulk(struct send_thread *thinf)
 	struct drain_thread drain;
 
 	retv = 0;
-	fin = fopen("/dev/urandom", "rb");
-	if (unlikely(!fin)) {
-		fprintf(stderr, "Cannot open /dev/urandom for reading: %s\n",
-				strerror(errno));
-		return errno;
-	}
-	off = 0;
-	buflen = pinf->buflen;
-	do {
-		len = fread(wparam->buf+off, 1, buflen, fin);
-		if (unlikely(len == -1)) {
-			if (errno != EINTR)
-				fprintf(stderr, "Cannot read random bytes: %s\n",
-						strerror(errno));
-			fclose(fin);
-			return errno;
-		}
-		off = len;
-		buflen -= len;
-	} while (buflen > 0);
-	fclose(fin);
-
 	drain.sock = wparam->sock;
 	drain.pinf = wparam->pinf;
 	drain.running = -1;
