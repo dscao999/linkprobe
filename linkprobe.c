@@ -512,7 +512,6 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 		fclose(fout);
 	}
 	if (prec && hdinc) {
-		prec->pkts += 1;
 		prec->dport += hdinc->inc_dport;
 		prec->sport += hdinc->inc_sport;
 		prec->daddr += hdinc->inc_daddr;
@@ -1319,7 +1318,6 @@ static int do_client(struct worker_params *wparam)
 	thinf.prec.dport = c_dport;
 	thinf.prec.saddr = c_saddr;
 	thinf.prec.daddr = c_daddr;
-	thinf.prec.pkts = 0;
 	thinf.wparam.pinf = pinf;
 	thinf.wparam.mark_value = wparam->mark_value;
 	thinf.wparam.sock = init_sock(&thinf.wparam, 0, 1);
@@ -1352,8 +1350,8 @@ static int send_bulk(struct send_thread *thinf)
 	struct worker_params *wparam = &thinf->wparam;
 	struct packet_record *prec = &thinf->prec;
 	const struct sockaddr_ll *peer = thinf->peer;
-	int retv, buflen, off, len, sysret, last;
-	long count, telapsed;
+	int retv, buflen, off, len, sysret, last, count;
+	long telapsed;
 	FILE *fin;
 	const char *payload;
 	const char *res;
@@ -1399,14 +1397,14 @@ static int send_bulk(struct send_thread *thinf)
 			strerror(sysret));
 		return -sysret;
 	}
-	count = 0;
+	prec->pkts = 0;
 	pkt = (struct ip_packet *)wparam->buf;
 	pkt->mark = htonl(wparam->mark_value);
 	pkt->msgtyp = htonl(V_BULK);
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
 	do {
 		*(long *)(pkt->payload) = random();
-		pkt->seq = count;
+		pkt->seq = prec->pkts;
 		len = prepare_udp(wparam->buf, pinf->mtu, NULL, 1, prec, &opt->hdinc);
 		sysret = sendto(wparam->sock, wparam->buf, len, 0,
 				(struct sockaddr *)peer, sizeof(*peer));
@@ -1417,7 +1415,7 @@ static int send_bulk(struct send_thread *thinf)
 			retv = -errno;
 			goto exit_10;
 		}
-		count += 1;
+		prec->pkts += 1;
 	} while (finish_up == 0 && global_exit == 0);
 	pkt->msgtyp = htonl(V_LAST_PACKET);
 	len = prepare_udp(wparam->buf, pinf->mtu, LAST_PACKET, 1, prec, &opt->hdinc);
@@ -1429,9 +1427,9 @@ static int send_bulk(struct send_thread *thinf)
 		retv = -errno;
 		goto exit_10;
 	}
-	count += 1;
+	prec->pkts += 1;
 	telapsed = tm_elapsed(&tm0, &tm1) / 1000;
-	printf("Total %ld packets sent in %ld milliseconds\n", count, telapsed);
+	printf("Total %ld packets sent in %ld milliseconds\n", prec->pkts, telapsed);
 
 	int tmout_cnt = 0;
 
