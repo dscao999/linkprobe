@@ -141,7 +141,7 @@ struct recv_thread {
 	struct statistics st;
 	const struct sockaddr_ll *peer;
 	volatile int running;
-	int numths;
+	int numths, idx;
 };
 
 struct send_thread {
@@ -153,6 +153,7 @@ struct send_thread {
 	const struct sockaddr_ll *peer;
 	volatile int running;
 	pthread_mutex_t *lmtx;
+	int idx;
 };
 
 static int getmtu(int ifindex)
@@ -468,7 +469,6 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 {
 	struct ip_packet *pkt;
 	struct iphdr *iph;
-	struct timespec tm;
 	int len, headlen;
 	unsigned short dport, sport;
 	unsigned int saddr, daddr;
@@ -493,8 +493,7 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 	iph->version = 4;
 	iph->ttl = 1;
 	iph->protocol = 17;
-	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm);
-	iph->id = tm.tv_nsec & 0x0ffff;
+	iph->id = random() & 0x0ffff;
 	iph->saddr = htonl(saddr);
 	iph->daddr = htonl(daddr);
 
@@ -735,9 +734,10 @@ static int recv_bulk(struct recv_thread *thinf)
 	st->tl = tm_elapsed(&tm0, &tm1);
 
 	if (verbose >= 1)
-		printf("Received %lu packets, %lu bytes, in %u microseconds. " \
-				"%lu foreign packets, %lu foreign bytes\n",
-				st->gcnt, st->gn, st->tl, st->bcnt, st->bn);
+		printf("Thread %2d received %lu packets, %lu bytes, in %u " \
+				"microseconds.  %lu foreign packets, %lu " \
+				"foreign bytes\n", thinf->idx, st->gcnt, st->gn,
+				st->tl, st->bcnt, st->bn);
 	return retv;
 }
 
@@ -983,6 +983,7 @@ static int do_server(struct worker_params *wparam)
 		}
 		stop = 0;
 		for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
+			thinf->idx = i;
 			thinf->wparam.pinf = wparam->pinf;
 			thinf->wparam.mark_value = wparam->mark_value;
 			thinf->stop = &stop;
@@ -1041,7 +1042,7 @@ static int do_server(struct worker_params *wparam)
 			retv = -errno;
 			break;
 		}
-		printf("Total %lu packets received, %lu bytes in %d seconds." \
+		printf("Total %lu packets, %lu bytes received in %d seconds." \
 				" %lu foreign packets, %lu bytes.\n",
 				st.gcnt, st.gn, st.tl/1000000, st.bcnt, st.bn);
 	}
@@ -1376,6 +1377,7 @@ static int do_client(struct worker_params *wparam)
 	}
 	startup = 0;
 	for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
+		thinf->idx = i;
 		thinf->wparam.sock = init_sock(&thinf->wparam, 0, 1);
 		if (unlikely(thinf->wparam.sock < 0)) {
 			retv = thinf->wparam.sock;
@@ -1420,7 +1422,7 @@ exit_30:
 	free(thinfs);
 	pthread_mutex_destroy(&lmtx);
 	if (startup)
-		printf("%lu packets sent\n", pkts);
+		printf("Total %lu packets sent\n", pkts);
 exit_20:
 	timer_delete(tmid);
 exit_10:
@@ -1500,8 +1502,8 @@ static int send_bulk(struct send_thread *thinf)
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	telapsed = tm_elapsed(&tm0, &tm1) / 1000;
 	if (verbose >= 1)
-		printf("Total %ld packets sent in %ld milliseconds\n",
-				prec->pkts, telapsed);
+		printf("Thread %2d sent %ld packets in %ld milliseconds\n",
+				thinf->idx, prec->pkts, telapsed);
 
 	int tmout_cnt = 0;
 
