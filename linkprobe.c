@@ -147,11 +147,12 @@ struct recv_thread {
 struct send_thread {
 	pthread_t thid;
 	volatile double *bandwidth;
-	volatile int *stop;
+	volatile int *stop, *last;
 	struct packet_record prec;
 	struct worker_params wparam;
 	const struct sockaddr_ll *peer;
 	volatile int running;
+	pthread_mutex_t *lmtx;
 };
 
 static int getmtu(int ifindex)
@@ -712,9 +713,12 @@ static int recv_bulk(struct recv_thread *thinf)
 	if (tmcnt == POLL_CNT)
 		retv = 255;
 	pfd.revents = 0;
-	sysret = poll(&pfd, 1, 0);
-	if (sysret > 0)
-		check_ring(opt, st, rxr, wparam->mark_value);
+	do {
+		sysret = poll(&pfd, 1, POLL_TIME);
+		if (sysret > 0)
+			check_ring(opt, st, rxr, wparam->mark_value);
+		tmcnt += 1;
+	} while (tmcnt < POLL_CNT);
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	st->tl = tm_elapsed(&tm0, &tm1);
 
@@ -1301,6 +1305,7 @@ static int do_client(struct worker_params *wparam)
 	struct sigevent sevent;
 	struct itimerspec itm;
 	struct timespec stm, remtm;
+	volatile int last = 0;
 
 	memset(&sact, 0, sizeof(sact));
 	sact.sa_handler = sig_handler;
@@ -1322,7 +1327,9 @@ static int do_client(struct worker_params *wparam)
 	struct send_thread *thinf, *thinfs;
 	double speed;
 	int i, startup;
+	pthread_mutex_t lmtx;
 
+	pthread_mutex_init(&lmtx, NULL);
 	numths = opt->numths;
 	speed = -1.0;
 	finish_up = 0;
@@ -1336,6 +1343,8 @@ static int do_client(struct worker_params *wparam)
 		goto exit_20;
 	}
 	for (i = 0, thinf = thinfs; i < numths; i++, thinf++) {
+		thinf->lmtx = &lmtx;
+		thinf->last = &last;
 		thinf->bandwidth = &speed;
 		thinf->stop = &finish_up;
 		thinf->prec.sport = c_sport + (random() & 0x0ff);
@@ -1391,6 +1400,7 @@ exit_30:
 			close_sock(&thinf->wparam);
 	}
 	free(thinfs);
+	pthread_mutex_destroy(&lmtx);
 exit_20:
 	timer_delete(tmid);
 exit_10:
@@ -1472,15 +1482,20 @@ static int send_bulk(struct send_thread *thinf)
 	} while (finish_up == 0 && global_exit == 0);
 	pkt->msgtyp = htonl(V_LAST_PACKET);
 	len = prepare_udp(wparam->buf, pinf->mtu, LAST_PACKET, 1, prec, &opt->hdinc);
-	sysret = sendto(wparam->sock, wparam->buf, len, 0, 
-			(struct sockaddr *)peer, sizeof(*peer));
-	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
-	if (unlikely(sysret == -1)) {
-		fprintf(stderr, "Send failed: %s\n", strerror(errno));
-		retv = -errno;
-		goto exit_10;
+	pthread_mutex_lock(thinf->lmtx);
+	if (*thinf->last == 0) {
+		*thinf->last = 1;
+		sysret = sendto(wparam->sock, wparam->buf, len, 0,
+				(struct sockaddr *)peer, sizeof(*peer));
+		if (unlikely(sysret == -1)) {
+			fprintf(stderr, "Send failed: %s\n", strerror(errno));
+			retv = -errno;
+			goto exit_10;
+		}
+		prec->pkts += 1;
 	}
-	prec->pkts += 1;
+	pthread_mutex_unlock(thinf->lmtx);
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	telapsed = tm_elapsed(&tm0, &tm1) / 1000;
 	printf("Total %ld packets sent in %ld milliseconds\n", prec->pkts, telapsed);
 
@@ -1494,7 +1509,7 @@ static int send_bulk(struct send_thread *thinf)
 	pkt = (struct ip_packet *)wparam->buf;
 	do {
 		pfd.revents = 0;
-		sysret = poll(&pfd, 1, POLL_TIME);
+		sysret = poll(&pfd, 1, 2*POLL_TIME);
 		if (unlikely(sysret == 0)) {
 			count += 1;
 			continue;
