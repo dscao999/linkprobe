@@ -1433,7 +1433,7 @@ static int send_bulk(struct send_thread *thinf)
 	struct worker_params *wparam = &thinf->wparam;
 	struct packet_record *prec = &thinf->prec;
 	const struct sockaddr_ll *peer = thinf->peer;
-	int retv, len, sysret, last, count;
+	int retv, len, sysret, last, count, msent;
 	long telapsed;
 	const char *payload;
 	struct timespec tm0, tm1;
@@ -1478,9 +1478,16 @@ static int send_bulk(struct send_thread *thinf)
 	} while (finish_up == 0 && global_exit == 0);
 	pkt->msgtyp = htonl(V_LAST_PACKET);
 	len = prepare_udp(wparam->buf, pinf->mtu, LAST_PACKET, 1, prec, &opt->hdinc);
-	pthread_mutex_lock(thinf->lmtx);
+	msent = 0;
 	if (*thinf->last == 0) {
-		*thinf->last = 1;
+		pthread_mutex_lock(thinf->lmtx);
+		if (*thinf->last == 0) {
+			*thinf->last = 1;
+			msent = 1;
+		}
+		pthread_mutex_unlock(thinf->lmtx);
+	}
+	if (msent == 1) {
 		sysret = sendto(wparam->sock, wparam->buf, len, 0,
 				(struct sockaddr *)peer, sizeof(*peer));
 		if (unlikely(sysret == -1)) {
@@ -1490,7 +1497,6 @@ static int send_bulk(struct send_thread *thinf)
 		}
 		prec->pkts += 1;
 	}
-	pthread_mutex_unlock(thinf->lmtx);
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	telapsed = tm_elapsed(&tm0, &tm1) / 1000;
 	if (verbose >= 1)
