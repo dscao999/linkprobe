@@ -1158,7 +1158,7 @@ int main(int argc, char *argv[])
 	memset(&pinf, 0, sizeof(pinf));
 	pinf.opt = &cmdopt;
 	pinf.mtu = getmtu(cmdopt.ifindex);
-	mtu = pinf.mtu;
+	mtu = pinf.mtu + TPACKET_HDRLEN;
 	nbits = 0;
 	while (mtu) {
 		nbits += 1;
