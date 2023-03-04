@@ -18,4 +18,5 @@ unsigned short iphdr_check(const struct iphdr *iph);
 unsigned short udp_check(const struct iphdr *iph,
                 const struct udphdr *udph);
 const char *udp_payload(const char *l2buf, int len);
+void dump_packet(const struct ip_packet *ipkt);
 #endif  /* IPUDP_DSCAO__ */

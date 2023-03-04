@@ -117,3 +117,16 @@ const char * udp_payload(const char *l2buf, int len)
 	}
 	return pkt->payload;
 }
+
+void dump_packet(const struct ip_packet *ipkt)
+{
+	const struct iphdr *iph = &ipkt->iph;
+	const struct udphdr *udph = &ipkt->udph;
+	char ipaddr[24];
+
+	inet_ntop(AF_INET, &iph->saddr, ipaddr, sizeof(ipaddr));
+	printf("ID %hu, Src %s ", iph->id, ipaddr);
+	inet_ntop(AF_INET, &iph->daddr, ipaddr, sizeof(ipaddr));
+	printf("Dst %s. Src Port: %hd Dst Port: %hd\n", ipaddr,
+			ntohs(udph->source), ntohs(udph->dest));
+}

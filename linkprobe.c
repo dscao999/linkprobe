@@ -41,6 +41,12 @@
 #define POLL_TIME	250
 #define POLL_CNT	4
 
+#ifndef NDEBUG
+#define DUMP_PACKET(pkt)	dump_packet((pkt))
+#else
+#define DUMP_PACKET(pkt)
+#endif
+
 int verbose = 0;
 
 static volatile int global_exit = 0;
@@ -581,11 +587,13 @@ static int check_ring(const struct cmdopts *opt, struct statistics *st,
 		ippkt = (struct ip_packet *)pktbuf;
 		payload = udp_payload(pktbuf, pktlen);
 		if (unlikely(!payload||ntohl(ippkt->mark) != mark_value||
-					(ippkt->msgtyp != htonl(V_BULK) &&
-					 ippkt->msgtyp != htonl(V_LAST_PACKET)))) {
+				(ippkt->msgtyp != htonl(V_BULK) &&
+				 ippkt->msgtyp != htonl(V_LAST_PACKET)))) {
 			st->bn += pktlen + 18;
 			st->bcnt += 1;
 		} else {
+			if (unlikely(verbose >= 3))
+				DUMP_PACKET((const struct ip_packet *)pktbuf);
 			st->gn += pktlen + 18;
 			st->gcnt += 1;
 			if (ippkt->msgtyp == htonl(V_LAST_PACKET))
