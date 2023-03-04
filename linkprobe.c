@@ -785,7 +785,7 @@ static int init_sock(struct worker_params *wparam, int rx, int fanout)
 	const struct cmdopts *opt = pinf->opt;
 	struct tpacket_req req_ring;
 	struct rx_ring *rxr = &wparam->rxr;
-	int ring;
+	int ring, flag;
 
 	retv = 0;
 	dlsock = create_sock(opt);
@@ -808,10 +808,13 @@ static int init_sock(struct worker_params *wparam, int rx, int fanout)
 		req_ring.tp_block_nr = opt->nrblock;
 		req_ring.tp_frame_nr = opt->nrblock * opt->nrframe;
 		rxr->size = req_ring.tp_block_size * req_ring.tp_block_nr;
-		if (rx == 1)
+		if (rx == 1) {
 			ring = PACKET_RX_RING;
-		else
+			flag = TP_STATUS_KERNEL;
+		} else {
 			ring = PACKET_TX_RING;
+			flag = TP_STATUS_AVAILABLE;
+		}
 		sysret = setsockopt(dlsock, SOL_PACKET, ring, &req_ring,
 				sizeof(req_ring));
 		if (unlikely(sysret == -1)) {
@@ -832,7 +835,7 @@ static int init_sock(struct worker_params *wparam, int rx, int fanout)
 		for (curframe = rxr->ring; curframe < rxr->ring + rxr->size;
 				curframe += rxr->strip) {
 			pkthdr = (struct tpacket_hdr *)curframe;
-			pkthdr->tp_status = TP_STATUS_KERNEL;
+			pkthdr->tp_status = flag;
 		}
 	}
 
