@@ -453,7 +453,7 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 				exopt->hdinc.inc_sport == 0 &&
 				exopt->hdinc.inc_daddr == 0 &&
 				exopt->hdinc.inc_saddr == 0)
-			exopt->hdinc.inc_dport = 1;
+			exopt->hdinc.inc_saddr = 1;
 	} else {
 		if (exopt->probe_only) {
 			exopt->probe_only = 0;
@@ -471,7 +471,7 @@ static const unsigned int c_saddr = (192 << 24) | (168 << 16) | (117 << 8) | 10;
 static const unsigned int c_daddr = (192 << 24) | (168 << 16) | (119 << 8) | 10;
 
 static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
-		struct packet_record *prec, const struct header_inc *hdinc)
+		struct packet_record *prec)
 {
 	struct ip_packet *pkt;
 	struct iphdr *iph;
@@ -528,12 +528,6 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 		fout = fopen("/tmp/packet.dat", "wb");
 		fwrite(iph, 1, len, fout);
 		fclose(fout);
-	}
-	if (prec && hdinc) {
-		prec->dport += hdinc->inc_dport;
-		prec->sport += hdinc->inc_sport;
-		prec->daddr += hdinc->inc_daddr;
-		prec->saddr += hdinc->inc_saddr;
 	}
 
 	assert(iphdr_check(iph) == 0);
@@ -898,7 +892,7 @@ static void * recv_horse(void *arg)
 	ipkt->msgtyp = htonl(V_RECV_READY);
 	peer = thinf->peer;
 	sprintf(mesg, "%d %s", thinf->numths, RECV_READY);
-	len = prepare_udp(buf, pinf->mtu, mesg, 0, NULL, NULL);
+	len = prepare_udp(buf, pinf->mtu, mesg, 0, NULL);
 	sysret = sendto(wparam->sock, buf, len, 0,
 			(const struct sockaddr *)peer, sizeof(*peer));
 	free(buf);
@@ -962,7 +956,7 @@ static int do_server(struct worker_params *wparam)
 
 		sprintf(mesg, "%s %ld", PROBE_ACK, random());
 		ipkt->msgtyp = htonl(V_PROBE_ACK);
-		len = prepare_udp(wparam->buf, pinf->mtu, mesg, 0, NULL, NULL);
+		len = prepare_udp(wparam->buf, pinf->mtu, mesg, 0, NULL);
 		sysret = sendto(wparam->sock, wparam->buf, len, 0,
 				(const struct sockaddr *)&peer, sizeof(peer));
 		if (unlikely(sysret == -1)) {
@@ -1040,7 +1034,7 @@ static int do_server(struct worker_params *wparam)
 		len += sprintf(mesg+len, "%s", END_TEST);
 		ipkt->mark = htonl(wparam->mark_value);
 		ipkt->msgtyp = htonl(V_END_TEST);
-		len = prepare_udp(buf, pinf->mtu, mesg, 0, NULL, NULL);
+		len = prepare_udp(buf, pinf->mtu, mesg, 0, NULL);
 		sysret = sendto(wparam->sock, wparam->buf, len, 0,
 				(struct sockaddr *)&peer, sizeof(peer));
 		if (unlikely(sysret == -1)) {
@@ -1244,7 +1238,7 @@ static int do_client(struct worker_params *wparam)
 	}
 	do {
 		ipkt->msgtyp = msgtyp;
-		len = prepare_udp(wparam->buf, pinf->mtu, mesg, 0, NULL, NULL);
+		len = prepare_udp(wparam->buf, pinf->mtu, mesg, 0, NULL);
 		sysret = sendto(wparam->sock, wparam->buf, len, 0,
 				(struct sockaddr *)&peer, sizeof(peer));
 		if (sysret == -1) {
@@ -1467,6 +1461,14 @@ static int send_bulk(struct send_thread *thinf)
 		return -sysret;
 	}
 	prec->pkts = 0;
+	if (opt->hdinc.inc_dport)
+		prec->dport += random() & 0x0ff;
+	if (opt->hdinc.inc_sport)
+		prec->sport += random() & 0x0ff;
+	if (opt->hdinc.inc_daddr)
+		prec->daddr += random() & 0x0ff;
+	if (opt->hdinc.inc_saddr)
+		prec->saddr += random() & 0x0ff;
 	pkt = (struct ip_packet *)wparam->buf;
 	pkt->mark = htonl(wparam->mark_value);
 	pkt->msgtyp = htonl(V_BULK);
@@ -1474,7 +1476,7 @@ static int send_bulk(struct send_thread *thinf)
 	do {
 		*(long *)(pkt->payload) = random();
 		pkt->seq = prec->pkts;
-		len = prepare_udp(wparam->buf, pinf->mtu, NULL, 1, prec, &opt->hdinc);
+		len = prepare_udp(wparam->buf, pinf->mtu, NULL, 1, prec);
 		sysret = sendto(wparam->sock, wparam->buf, len, 0,
 				(struct sockaddr *)peer, sizeof(*peer));
 		if (unlikely(sysret == -1)) {
@@ -1487,7 +1489,7 @@ static int send_bulk(struct send_thread *thinf)
 		prec->pkts += 1;
 	} while (finish_up == 0 && global_exit == 0);
 	pkt->msgtyp = htonl(V_LAST_PACKET);
-	len = prepare_udp(wparam->buf, pinf->mtu, LAST_PACKET, 1, prec, &opt->hdinc);
+	len = prepare_udp(wparam->buf, pinf->mtu, LAST_PACKET, 1, prec);
 	msent = 0;
 	if (*thinf->last == 0) {
 		pthread_mutex_lock(thinf->lmtx);
