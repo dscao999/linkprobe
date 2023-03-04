@@ -785,6 +785,7 @@ static int init_sock(struct worker_params *wparam, int rx, int fanout)
 	const struct cmdopts *opt = pinf->opt;
 	struct tpacket_req req_ring;
 	struct rx_ring *rxr = &wparam->rxr;
+	int ring;
 
 	retv = 0;
 	dlsock = create_sock(opt);
@@ -807,7 +808,11 @@ static int init_sock(struct worker_params *wparam, int rx, int fanout)
 		req_ring.tp_block_nr = opt->nrblock;
 		req_ring.tp_frame_nr = opt->nrblock * opt->nrframe;
 		rxr->size = req_ring.tp_block_size * req_ring.tp_block_nr;
-		sysret = setsockopt(dlsock, SOL_PACKET, PACKET_RX_RING, &req_ring,
+		if (rx == 1)
+			ring = PACKET_RX_RING;
+		else
+			ring = PACKET_TX_RING;
+		sysret = setsockopt(dlsock, SOL_PACKET, ring, &req_ring,
 				sizeof(req_ring));
 		if (unlikely(sysret == -1)) {
 			fprintf(stderr, "Cannot get receive map buffer: %s\n",
@@ -1190,9 +1195,18 @@ exit_10:
 static void *send_horse(void *arg)
 {
 	struct send_thread *thinf = arg;
+	const struct cmdopts *opt = thinf->wparam.pinf->opt;
 	int retv;
 
 	thinf->running = 1;
+	if (opt->hdinc.inc_dport)
+		thinf->prec.dport += random() & 0x0ff;
+	if (opt->hdinc.inc_sport)
+		thinf->prec.sport += random() & 0x0ff;
+	if (opt->hdinc.inc_daddr)
+		thinf->prec.daddr += random() & 0x0ff;
+	if (opt->hdinc.inc_saddr)
+		thinf->prec.saddr += random() & 0x0ff;
 	retv = send_bulk(thinf);
 	thinf->running = 0;
 
@@ -1367,7 +1381,7 @@ static int do_client(struct worker_params *wparam)
 		thinf->last = &last;
 		thinf->bandwidth = &speed;
 		thinf->stop = &finish_up;
-		thinf->prec.sport = c_sport + (random() & 0x0ff);
+		thinf->prec.sport = c_sport;
 		thinf->prec.dport = c_dport;
 		thinf->prec.saddr = c_saddr;
 		thinf->prec.daddr = c_daddr;
@@ -1444,7 +1458,6 @@ static int send_bulk(struct send_thread *thinf)
 	struct pollfd pfd;
 	struct ip_packet *pkt;
 	const struct proc_info *pinf = wparam->pinf;
-	const struct cmdopts *opt = pinf->opt;
 	struct drain_thread drain;
 
 	retv = 0;
@@ -1461,14 +1474,6 @@ static int send_bulk(struct send_thread *thinf)
 		return -sysret;
 	}
 	prec->pkts = 0;
-	if (opt->hdinc.inc_dport)
-		prec->dport += random() & 0x0ff;
-	if (opt->hdinc.inc_sport)
-		prec->sport += random() & 0x0ff;
-	if (opt->hdinc.inc_daddr)
-		prec->daddr += random() & 0x0ff;
-	if (opt->hdinc.inc_saddr)
-		prec->saddr += random() & 0x0ff;
 	pkt = (struct ip_packet *)wparam->buf;
 	pkt->mark = htonl(wparam->mark_value);
 	pkt->msgtyp = htonl(V_BULK);
