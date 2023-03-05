@@ -508,8 +508,7 @@ static int prepare_udp(char *buf, int buflen, const char *mesg, int bulk,
 	else
 		pkt->payload[0] = 0;
 	if (!bulk) {
-		len = strlen(pkt->payload) + 1 + sizeof(struct ip_packet) -
-				sizeof(struct iphdr) - sizeof(struct udphdr);
+		len = strlen(pkt->payload)+1+sizeof(struct ip_packet)-headlen;
 		if (len < MINI_UDPLEN)
 			len = MINI_UDPLEN;
 	} else
