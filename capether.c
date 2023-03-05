@@ -101,7 +101,8 @@ int main(int argc, char *argv[])
 				sysret);
 		payload = udp_payload(combuf, sysret);
 		if (payload)
-			printf("A UDP Packet\n");
+			continue;
+		printf("A UDP Packet. Length: %d\n", sysret);
 	} while (global_exit == 0);
 
 exit_10:

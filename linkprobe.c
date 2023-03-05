@@ -1264,6 +1264,7 @@ static int fill_send_ring(struct send_thread *thinf, int last)
 		ippkt->msgtyp = htonl(V_LAST_PACKET);
 		tphdr->tp_len = prepare_udp((char *)ippkt, pinf->mtu,
 				LAST_PACKET, 1, prec);
+		tphdr->tp_snaplen = tphdr->tp_len
 		WRITE_ONCE(tphdr->tp_status, TP_STATUS_SEND_REQUEST);
 		return count;
 	}
@@ -1555,7 +1556,7 @@ static int send_bulk(struct send_thread *thinf)
 	sysret = sendto(wparam->sock, NULL, 0, 0,
 			(const struct sockaddr *)peer, sizeof(*peer));
 	if (unlikely(sysret == -1)) {
-		fprintf(stderr, "send failed: %s\n", strerror(errno));
+		fprintf(stderr, "tx send failed: %s\n", strerror(errno));
 		retv = -errno;
 		goto exit_10;
 	}
@@ -1577,7 +1578,7 @@ static int send_bulk(struct send_thread *thinf)
 		sysret = sendto(wparam->sock, NULL, 0, 0,
 				(const struct sockaddr *)peer, sizeof(*peer));
 		if (unlikely(sysret == -1)) {
-			fprintf(stderr, "send failed: %s\n", strerror(errno));
+			fprintf(stderr, "tx send failed: %s\n", strerror(errno));
 			retv = -errno;
 			goto exit_10;
 		}
@@ -1593,9 +1594,10 @@ static int send_bulk(struct send_thread *thinf)
 	}
 	if (msent == 1) {
 		fill_send_ring(thinf, 1);
-		sysret = send(wparam->sock, NULL, 0, 0);
+		sysret = sendto(wparam->sock, NULL, 0, 0,
+				(const struct sockaddr *)peer, sizeof(*peer));
 		if (unlikely(sysret == -1)) {
-			fprintf(stderr, "Send failed: %s\n", strerror(errno));
+			fprintf(stderr, "TX Send failed: %s\n", strerror(errno));
 			retv = -errno;
 			goto exit_10;
 		}
