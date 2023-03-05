@@ -1219,17 +1219,19 @@ static void *send_horse(void *arg)
 
 static void setup_send_ring(struct send_thread *thinf)
 {
-	struct worker_param *wparam = &thinf->wparam;
+	struct worker_params *wparam = &thinf->wparam;
 	char *curframe;
 	struct tpacket_hdr *tphdr;
 	struct sockaddr_ll *addr;
 	struct ip_packet *ippkt;
+	struct rx_ring *rxr = &wparam->rxr;
 
 	for (curframe = rxr->ring; curframe < rxr->ring + rxr->size;
 			curframe += rxr->strip) {
 		tphdr = (struct tpacket_hdr *)curframe;
-		addr = curframe + TPACKET_ALIGN(sizeof(struct tpacket_hdr));
-		memcpy(addr, peer, sizeof(struct sockaddr_ll));
+		addr = (struct sockaddr_ll *)(curframe +
+				TPACKET_ALIGN(sizeof(struct tpacket_hdr)));
+		memcpy(addr, thinf->peer, sizeof(struct sockaddr_ll));
 		tphdr->tp_net = TPACKET_ALIGN(TPACKET_HDRLEN);
 		ippkt = (struct ip_packet *)(curframe + tphdr->tp_net);
 		ippkt->mark = htonl(wparam->mark_value);
@@ -1237,22 +1239,48 @@ static void setup_send_ring(struct send_thread *thinf)
 	}
 }
 
-static void fill_send_ring(struct send_thread *thinf)
+static int fill_send_ring(struct send_thread *thinf, int last)
 {
 	struct rx_ring *rxr = &thinf->wparam.rxr;
-	struct proc_info *pinf = &thinf->wparam.pinf;
+	const struct proc_info *pinf = thinf->wparam.pinf;
 	struct packet_record *prec = &thinf->prec;
 	char *curframe;
 	struct tpacket_hdr *tphdr;
 	struct ip_packet *ippkt;
+	int count = 0;
 
+	if (unlikely(last)) {
+		for (curframe = rxr->ring; curframe < rxr->ring + rxr->size;
+				curframe += rxr->strip) {
+			tphdr = (struct tpacket_hdr *)curframe;
+			if (READ_ONCE(tphdr->tp_status) == TP_STATUS_AVAILABLE)
+				break;
+		}
+		assert(curframe < rxr->ring + rxr->size);
+		count += 1;
+		ippkt = (struct ip_packet *)(curframe + tphdr->tp_net);
+		*(long *)(ippkt->payload) = random();
+		ippkt->seq = prec->pkts++;
+		ippkt->msgtyp = htonl(V_LAST_PACKET);
+		tphdr->tp_len = prepare_udp((char *)ippkt, pinf->mtu,
+				LAST_PACKET, 1, prec);
+		WRITE_ONCE(tphdr->tp_status, TP_STATUS_SEND_REQUEST);
+		return count;
+	}
 	for (curframe = rxr->ring; curframe < rxr->ring + rxr->size;
 			curframe += rxr->strip) {
 		tphdr = (struct tpacket_hdr *)curframe;
+		if (READ_ONCE(tphdr->tp_status) != TP_STATUS_AVAILABLE)
+			continue;
+		count += 1;
+		ippkt = (struct ip_packet *)(curframe + tphdr->tp_net);
 		*(long *)(ippkt->payload) = random();
 		ippkt->seq = prec->pkts++;
-		tphdr->tp_len = prepare_udp(curframe, pinf->mtu, NULL, 1, prec);
+		tphdr->tp_len = prepare_udp((char *)ippkt, pinf->mtu, NULL,
+				1, prec);
+		WRITE_ONCE(tphdr->tp_status, TP_STATUS_SEND_REQUEST);
 	}
+	return count;
 }
 
 static int do_client(struct worker_params *wparam)
@@ -1441,7 +1469,7 @@ static int do_client(struct worker_params *wparam)
 			retv = thinf->wparam.sock;
 			goto exit_30;
 		}
-		setup_send_ring(&thinf->wparam.rxr, &peer);
+		setup_send_ring(thinf);
 		sysret = pthread_create(&thinf->thid, NULL, send_horse, thinf);
 		if (unlikely(sysret != 0)) {
 			fprintf(stderr, "pthread create failed: %s\n",
@@ -1460,6 +1488,8 @@ static int do_client(struct worker_params *wparam)
 
 
 exit_30:
+	if (!startup)
+		finish_up = 1;
 	stm.tv_sec = 1;
 	stm.tv_nsec = 0;
 	do {
@@ -1467,7 +1497,6 @@ exit_30:
 		stm = remtm;
 	} while (sysret == -1 && errno == EINTR);
 	if (!startup) {
-		finish_up = 1;
 		memset(&itm, 0, sizeof(itm));
 		timer_settime(tmid, 0, &itm, NULL);
 	}
@@ -1493,15 +1522,16 @@ static int send_bulk(struct send_thread *thinf)
 {
 	struct worker_params *wparam = &thinf->wparam;
 	struct packet_record *prec = &thinf->prec;
-	const struct sockaddr_ll *peer = thinf->peer;
+	const struct proc_info *pinf = thinf->wparam.pinf;
+	struct rx_ring *rxr = &wparam->rxr;
 	int retv, len, sysret, last, count, msent;
 	long telapsed;
 	const char *payload;
 	struct timespec tm0, tm1;
 	struct pollfd pfd;
 	struct ip_packet *pkt;
-	const struct proc_info *pinf = wparam->pinf;
 	struct drain_thread drain;
+	const struct sockaddr_ll *peer = thinf->peer;
 
 	retv = 0;
 	drain.sock = wparam->sock;
@@ -1516,21 +1546,42 @@ static int send_bulk(struct send_thread *thinf)
 			strerror(sysret));
 		return -sysret;
 	}
+	count = 0;
 	prec->pkts = 0;
+	pfd.fd = wparam->sock;
+	pfd.events = POLLOUT;
+	fill_send_ring(thinf, 0);
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
+	sysret = sendto(wparam->sock, NULL, 0, 0,
+			(const struct sockaddr *)peer, sizeof(*peer));
+	if (unlikely(sysret == -1)) {
+		fprintf(stderr, "send failed: %s\n", strerror(errno));
+		retv = -errno;
+		goto exit_10;
+	}
 	do {
-		fill_send_ring(thinf);
-		sysret = send(wparam->sock, NULL, 0, 0);
+		pfd.revents = 0;
+		sysret = poll(&pfd, 1, POLL_TIME);
 		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
-				fprintf(stderr, "Send failed: %s\n",
+				fprintf(stderr, "poll failed: %s\n",
 						strerror(errno));
+			retv = -errno;
+			break;
+		} else if (sysret == 0) {
+			count += 1;
+			continue;
+		}
+		if (fill_send_ring(thinf, 0) == 0)
+			fprintf(stderr, "No frame is available!\n");
+		sysret = sendto(wparam->sock, NULL, 0, 0,
+				(const struct sockaddr *)peer, sizeof(*peer));
+		if (unlikely(sysret == -1)) {
+			fprintf(stderr, "send failed: %s\n", strerror(errno));
 			retv = -errno;
 			goto exit_10;
 		}
-	} while (finish_up == 0 && global_exit == 0);
-	pkt->msgtyp = htonl(V_LAST_PACKET);
-	len = prepare_udp(wparam->buf, pinf->mtu, LAST_PACKET, 1, prec);
+	} while (finish_up == 0 && global_exit == 0 && count < POLL_CNT);
 	msent = 0;
 	if (*thinf->last == 0) {
 		pthread_mutex_lock(thinf->lmtx);
@@ -1541,14 +1592,13 @@ static int send_bulk(struct send_thread *thinf)
 		pthread_mutex_unlock(thinf->lmtx);
 	}
 	if (msent == 1) {
-		sysret = sendto(wparam->sock, wparam->buf, len, 0,
-				(struct sockaddr *)peer, sizeof(*peer));
+		fill_send_ring(thinf, 1);
+		sysret = send(wparam->sock, NULL, 0, 0);
 		if (unlikely(sysret == -1)) {
 			fprintf(stderr, "Send failed: %s\n", strerror(errno));
 			retv = -errno;
 			goto exit_10;
 		}
-		prec->pkts += 1;
 	}
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
 	telapsed = tm_elapsed(&tm0, &tm1) / 1000;
@@ -1558,12 +1608,12 @@ static int send_bulk(struct send_thread *thinf)
 
 	int tmout_cnt = 0;
 
-	pfd.fd = wparam->sock;
+	len = pinf->buflen;
 	pfd.events = POLLIN;
 	count = 0;
 	payload = NULL;
 	last = 0;
-	pkt = (struct ip_packet *)wparam->buf;
+	pkt = (struct ip_packet *)rxr->ring;
 	do {
 		pfd.revents = 0;
 		sysret = poll(&pfd, 1, 2*POLL_TIME);
@@ -1581,7 +1631,7 @@ static int send_bulk(struct send_thread *thinf)
 			break;
 		}
 		payload = NULL;
-		sysret = recv(wparam->sock, wparam->buf, len, 0);
+		sysret = recv(wparam->sock, rxr->ring, len, 0);
 		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
 				fprintf(stderr, "recvfrom failed: %s\n",
@@ -1589,7 +1639,7 @@ static int send_bulk(struct send_thread *thinf)
 			retv = -errno;
 			break;
 		}
-		payload = udp_payload(wparam->buf, sysret);
+		payload = udp_payload(rxr->ring, sysret);
 		if (payload) {
 			if (pkt->mark == htonl(wparam->mark_value) &&
 					pkt->msgtyp == htonl(V_END_TEST)) {
