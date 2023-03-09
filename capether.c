@@ -32,17 +32,17 @@ static inline void install_handler(void (*handler)(int))
 }
 
 static struct list_head ifhead = LIST_HEAD_INIT(ifhead);
-static char combuf[512];
+static char combuf[2048];
 
 int main(int argc, char *argv[])
 {
 	const char *ifname;
-	int numcards, retv, sysret;
+	int numcards, retv, sysret, remlen;
 	struct netcard *nic;
 	struct sockaddr_ll me, peer;
 	socklen_t socklen;
-	int dlsock;
-	const char *payload;
+	int dlsock, i;
+	FILE *fout;
 
 	retv = 0;
 	if (argc < 2) {
@@ -83,6 +83,9 @@ int main(int argc, char *argv[])
 		retv = errno;
 		goto exit_10;
 	}
+	for (i = 0; i < sizeof(combuf); i++)
+		combuf[i] = 0xff;
+	fout = fopen("/tmp/packets.dat", "wb");
 	do {
 		socklen = sizeof(peer);
 		sysret = recvfrom(dlsock, combuf, sizeof(combuf), 0,
@@ -96,13 +99,13 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "Unexpected end of AF_PACKET\n");
 			break;
 		}
-		printf("One packet received from %02x:%02x:%02x:%02x:%02x:%02x, length: %d\n", peer.sll_addr[0],
-				peer.sll_addr[1], peer.sll_addr[2], peer.sll_addr[3], peer.sll_addr[4], peer.sll_addr[5],
-				sysret);
-		payload = udp_payload(combuf, sysret);
-		if (payload)
-			printf("A UDP Packet\n");
+		fwrite(combuf, 1, sysret, fout);
+		remlen = ((sysret + 31) & (~31)) - sysret;
+		if (remlen > 0)
+			fwrite(combuf+sysret, 1, remlen, fout);
+		printf("Received %d bytes, write %d bytes\n", sysret, (sysret + remlen));
 	} while (global_exit == 0);
+	fclose(fout);
 
 exit_10:
 	close(dlsock);
