@@ -1232,7 +1232,8 @@ static void setup_send_ring(struct send_thread *thinf)
 		addr = (struct sockaddr_ll *)(curframe +
 				TPACKET_ALIGN(sizeof(struct tpacket_hdr)));
 		memcpy(addr, thinf->peer, sizeof(struct sockaddr_ll));
-		tphdr->tp_net = TPACKET_ALIGN(TPACKET_HDRLEN);
+		tphdr->tp_net = TPACKET_ALIGN(sizeof(struct tpacket_hdr));
+		tphdr->tp_mac = tphdr->tp_net;
 		ippkt = (struct ip_packet *)(curframe + tphdr->tp_net);
 		ippkt->mark = htonl(wparam->mark_value);
 		ippkt->msgtyp = htonl(V_BULK);
@@ -1264,7 +1265,7 @@ static int fill_send_ring(struct send_thread *thinf, int last)
 		ippkt->msgtyp = htonl(V_LAST_PACKET);
 		tphdr->tp_len = prepare_udp((char *)ippkt, pinf->mtu,
 				LAST_PACKET, 1, prec);
-		tphdr->tp_snaplen = tphdr->tp_len
+		tphdr->tp_snaplen = tphdr->tp_len;
 		WRITE_ONCE(tphdr->tp_status, TP_STATUS_SEND_REQUEST);
 		return count;
 	}
@@ -1279,6 +1280,7 @@ static int fill_send_ring(struct send_thread *thinf, int last)
 		ippkt->seq = prec->pkts++;
 		tphdr->tp_len = prepare_udp((char *)ippkt, pinf->mtu, NULL,
 				1, prec);
+		tphdr->tp_snaplen = tphdr->tp_len;
 		WRITE_ONCE(tphdr->tp_status, TP_STATUS_SEND_REQUEST);
 	}
 	return count;

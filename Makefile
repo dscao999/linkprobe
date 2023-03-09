@@ -3,7 +3,7 @@ LDFLAGS = -pthread
 
 .PHONY:	clean all release
 
-ALL = udpcom capether linkprobe checksum
+ALL = udpcom capether linkprobe checksum txmmap
 
 all: $(ALL)
 
@@ -23,6 +23,9 @@ linkprobe: linkprobe.o enumnet.o ipudp.o
 	$(LINK.o) $^ -lrt -o $@
 
 checksum: checksum.o ipudp.o
+	$(LINK.o) $^ -o $@
+
+txmmap: txmmap.o
 	$(LINK.o) $^ -o $@
 
 clean:
