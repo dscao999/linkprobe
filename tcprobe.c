@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <poll.h>
 #include <time.h>
+#include <assert.h>
 #include "list_head.h"
 
 #define unlikely(x)	__builtin_expect(!!(x), 0)
@@ -139,9 +140,9 @@ exit_10:
 }
 
 static int do_server(int sock);
-static int do_client(int sock);
+static int do_client(int sock, int interval);
 
-static int do_client(int sock)
+static int do_client(int sock, int interval)
 {
 	char *buf;
 	int retv = 0, sysret;
@@ -168,7 +169,7 @@ static int do_client(int sock)
 	finish_up = 0;
 	seq = 0;
 	memset(&itm, 0, sizeof(itm));
-	itm.it_value.tv_sec = 60;
+	itm.it_value.tv_sec = interval;
 	sysret = timer_settime(timerid, 0, &itm, NULL);
 	if (unlikely(sysret == -1)) {
 		fprintf(stderr, "timer_settime failed: %sn\n", strerror(errno));
@@ -271,13 +272,39 @@ int main(int argc, char *argv[])
 	int server = 0;
 	struct addrinfo hints, *res;
 	struct sigaction act;
+	int c, fin, interval;
+	extern int optind, opterr, optopt;
 
-	if (argc < 2) {
+	interval = 0;
+	fin = 0;
+	do {
+		c = getopt(argc, argv, ":t:");
+		switch(c) {
+			case ':':
+				fprintf(stderr, "Missing argument for '%c'\n", (char)optopt);
+				break;
+			case '?':
+				fprintf(stderr, "Unknown option '%c'\n", (char)optopt);
+				break;
+			case -1:
+				fin = 1;
+				break;
+			case 't':
+				interval = atoi(optarg);
+				break;
+			default:
+				assert(0);
+		}
+	} while (fin == 0);
+	if (interval == 0)
+		interval = 60;
+
+	if (optind == argc) {
 		server = 1;
 		printf("Listening for connections...\n");
 	} else {
 		server = 0;
-		svrip = argv[1];
+		svrip = argv[optind];
 	}
 
 	memset(&act, 0, sizeof(act));
@@ -322,7 +349,7 @@ int main(int argc, char *argv[])
 			retv = errno;
 			goto exit_20;
 		}
-		retv = do_client(sock);
+		retv = do_client(sock, interval);
 	}
 
 exit_20:
