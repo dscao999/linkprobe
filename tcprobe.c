@@ -15,7 +15,7 @@
 
 #define unlikely(x)	__builtin_expect(!!(x), 0)
 
-const char port[] = "34231";
+const char default_port[] = "34231";
 
 static volatile int global_exit;
 static volatile int finish_up = 0;
@@ -265,20 +265,28 @@ static int do_server(int sock)
 	return retv;
 }
 
+enum TCPUDP {TCP = 0, UDP = 1};
+
+struct cmd_options {
+	const char *svrip, *port;
+	int interval;
+	int role;
+	enum TCPUDP tcp;
+};
+
 int main(int argc, char *argv[])
 {
-	const char *svrip;
 	int sock, sysret, retv = 0;
-	int server = 0;
 	struct addrinfo hints, *res;
 	struct sigaction act;
-	int c, fin, interval;
+	int c, fin;
+	struct cmd_options cmdopt;
 	extern int optind, opterr, optopt;
 
-	interval = 0;
+	memset(&cmdopt, 0, sizeof(cmdopt));
 	fin = 0;
 	do {
-		c = getopt(argc, argv, ":t:");
+		c = getopt(argc, argv, ":l:p:tu");
 		switch(c) {
 			case ':':
 				fprintf(stderr, "Missing argument for '%c'\n", (char)optopt);
@@ -289,22 +297,27 @@ int main(int argc, char *argv[])
 			case -1:
 				fin = 1;
 				break;
-			case 't':
-				interval = atoi(optarg);
+			case 'l':
+				cmdopt.interval = atoi(optarg);
+				break;
+			case 'p':
+				cmdopt.port = optarg;
 				break;
 			default:
 				assert(0);
 		}
 	} while (fin == 0);
-	if (interval == 0)
-		interval = 60;
+	if (cmdopt.interval == 0)
+		cmdopt.interval = 60;
+	if (cmdopt.port == NULL)
+		cmdopt.port = default_port;
 
 	if (optind == argc) {
-		server = 1;
+		cmdopt.role = 1;
 		printf("Listening for connections...\n");
 	} else {
-		server = 0;
-		svrip = argv[optind];
+		cmdopt.role = 0;
+		cmdopt.svrip = argv[optind];
 	}
 
 	memset(&act, 0, sizeof(act));
@@ -321,9 +334,9 @@ int main(int argc, char *argv[])
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_INET;
 	hints.ai_socktype = SOCK_STREAM;
-	if (server) {
+	if (cmdopt.role == 1) {
 		hints.ai_flags = AI_PASSIVE|AI_NUMERICSERV;
-		sysret = getaddrinfo(NULL, port, &hints, &res);
+		sysret = getaddrinfo(NULL, cmdopt.port, &hints, &res);
 		if (unlikely(sysret)) {
 			fprintf(stderr, "getaddrinfo failed: %s\n", gai_strerror(sysret));
 			retv = sysret;
@@ -337,7 +350,7 @@ int main(int argc, char *argv[])
 		}
 		retv = do_server(sock);
 	} else {
-		sysret = getaddrinfo(svrip, port, &hints, &res);
+		sysret = getaddrinfo(cmdopt.svrip, cmdopt.port, &hints, &res);
 		if (unlikely(sysret)) {
 			fprintf(stderr, "getaddrinfo failed: %s\n", gai_strerror(sysret));
 			retv = sysret;
@@ -349,7 +362,7 @@ int main(int argc, char *argv[])
 			retv = errno;
 			goto exit_20;
 		}
-		retv = do_client(sock, interval);
+		retv = do_client(sock, cmdopt.interval);
 	}
 
 exit_20:
