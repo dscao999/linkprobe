@@ -261,9 +261,9 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 		},
 		{
 			.name = "novary",
-			.has_arg = 1,
+			.has_arg = 0,
 			.flag = NULL,
-			.val = 'o'
+			.val = 'q'
 		},
 		{
 			.name = "interface",
@@ -319,9 +319,10 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 	static const unsigned short defdur = 20;
 	extern char *optarg;
 	extern int optind, opterr, optopt;
-	int fin, c, ncards, retv;
+	int fin, c, ncards, retv, novary;
 	char *iface;
 
+	novary = 0;
 	retv = 0;
 	ncards = enumerate_cards(&ifhead);
 	if (ncards == 0) {
@@ -332,7 +333,7 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 	fin = 0;
 	opterr = 0;
 	while (fin == 0) {
-		c = getopt_long(argc, argv, ":lpbi:d:a:o:n:f:t:v::",
+		c = getopt_long(argc, argv, ":lpbi:d:a:q:n:f:t:v::",
 				options, NULL);
 		switch(c) {
 			case -1:
@@ -375,18 +376,8 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 					fprintf(stderr, "Invalid variable: " \
 							"%s ignored\n", optarg);
 				break;
-			case 'o':
-				if (strcmp(optarg, "dport") == 0)
-					exopt->hdinc.inc_dport = 0;
-				else if (strcmp(optarg, "sport") == 0)
-					exopt->hdinc.inc_sport = 0;
-				else if (strcmp(optarg, "daddr") == 0)
-					exopt->hdinc.inc_daddr = 0;
-				else if (strcmp(optarg, "saddr") == 0)
-					exopt->hdinc.inc_saddr = 0;
-				else
-					fprintf(stderr, "Invalid variable: " \
-							"%s ignored\n", optarg);
+			case 'q':
+				novary = 1;
 				break;
 			case 'd':
 				exopt->duration = atoi(optarg);
@@ -454,6 +445,13 @@ static int parse_option(int argc, char *argv[], struct cmdopts *exopt)
 				exopt->hdinc.inc_daddr == 0 &&
 				exopt->hdinc.inc_saddr == 0)
 			exopt->hdinc.inc_saddr = 1;
+		if (novary) {
+			exopt->hdinc.inc_sport = 0;
+			exopt->hdinc.inc_dport = 0;
+			exopt->hdinc.inc_saddr = 0;
+			exopt->hdinc.inc_daddr = 0;
+		}
+
 	} else {
 		if (exopt->probe_only) {
 			exopt->probe_only = 0;
@@ -604,8 +602,7 @@ static void *receive_drain(void *arg)
 	int sysret, buflen, retv;
 	const char *payload, *res;
 	char *buf;
-	unsigned long total_bytes;
-	unsigned int usecs;
+	unsigned long total_bytes, usecs;
 	struct ip_packet *pkt;
 	const struct proc_info *pinf = drain->pinf;
 
@@ -651,9 +648,9 @@ static void *receive_drain(void *arg)
 					ntohs(pkt->udph.dest));
 		} else if (pkt->msgtyp == htonl(V_END_TEST)) {
 			res = strchr(payload, ' ');
-			sscanf(res, "%lu %u", &total_bytes, &usecs);
+			sscanf(res, "%lu %lu", &total_bytes, &usecs);
 			*drain->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
-			printf("End Test received by receive drain\n");
+			printf("End Test received by receive drain. %lu, %lu\n", total_bytes, usecs);
 		}
 	} while (*drain->stop == 0 && global_exit == 0);
 	free(buf);
@@ -1658,17 +1655,17 @@ static int send_bulk(struct send_thread *thinf)
 	} while (*thinf->bandwidth == -1.0 && count < POLL_CNT &&
 			global_exit == 0 && tmout_cnt < 100);
 	if (last) {
-		unsigned long total_bytes;
-		unsigned int usecs;
+		unsigned long total_bytes, usecs;
 
-		sscanf(payload, "%lu %u", &total_bytes, &usecs);
+		sscanf(payload, "%lu %lu", &total_bytes, &usecs);
 		*thinf->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
-		printf("Speed: %18.2f bytes/s\n", *thinf->bandwidth);
 	} else if (*thinf->bandwidth == -1.0) {
 		retv = 255;
 		fprintf(stderr, "Waiting for V_END_TEST. ");
 		fprintf(stderr, Timeout);
 	}
+	if (msent)
+		printf("Speed: %18.2f bytes/s\n", *thinf->bandwidth);
 
 
 exit_10:
