@@ -3,11 +3,11 @@ LDFLAGS = -pthread
 
 .PHONY:	clean all release
 
-ALL = udpcom capether linkprobe checksum txmmap
+ALL = udpcom capether linkprobe checksum txmmap tcprobe
 
 all: $(ALL)
 
-release: linkprobe capether checksum
+release: linkprobe capether checksum tcprobe
 
 release: CFLAGS += -O2 -DNDEBUG -flto
 
@@ -27,6 +27,9 @@ checksum: checksum.o ipudp.o
 
 txmmap: txmmap.o
 	$(LINK.o) $^ -o $@
+
+tcprobe: tcprobe.o
+	$(LINK.o) $^ -lrt -o $@
 
 clean:
 	rm -rf *.o
