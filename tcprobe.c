@@ -139,7 +139,7 @@ exit_10:
 	return NULL;
 }
 
-static int do_server(int sock);
+static int do_tcp_server(int sock);
 static int do_client(int sock, int interval);
 
 static int do_client(int sock, int interval)
@@ -204,7 +204,7 @@ exit_10:
 	return retv;
 }
 
-static int do_server(int sock)
+static int do_tcp_server(int sock)
 {
 	int retv = 0, csock, sysret;
 	struct sockaddr_in peer;
@@ -348,7 +348,7 @@ int main(int argc, char *argv[])
 			retv = errno;
 			goto exit_20;
 		}
-		retv = do_server(sock);
+		retv = do_tcp_server(sock);
 	} else {
 		sysret = getaddrinfo(cmdopt.svrip, cmdopt.port, &hints, &res);
 		if (unlikely(sysret)) {
