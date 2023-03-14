@@ -37,7 +37,7 @@ struct thread_arg {
 	volatile int *stop;
 	int sock;
 };
-static const int buflen = 65536;
+static const int buflen = 65536 - 64;
 
 static inline unsigned long tm_elapsed(const struct timespec *t0, const struct timespec *t1)
 {
@@ -141,6 +141,7 @@ exit_10:
 
 static int do_tcp_server(int sock);
 static int do_client(int sock, int interval);
+static int do_udp_server(int sock);
 
 static int do_client(int sock, int interval)
 {
@@ -179,7 +180,7 @@ static int do_client(int sock, int interval)
 	do {
 		*((unsigned long *)buf) = seq++;
 		sysret = send(sock, buf, buflen, 0);
-		if (unlikely(sysret == -1)) {
+		if (unlikely(sysret == -1 && errno != EINTR)) {
 			fprintf(stderr, "send failed: %s\n", strerror(errno));
 			retv = errno;
 			goto exit_20;
@@ -199,6 +200,87 @@ static int do_client(int sock, int interval)
 
 exit_20:
 	timer_delete(timerid);
+exit_10:
+	free(buf);
+	return retv;
+}
+
+static int receive_udp(int sock, char *buf, int buflen,
+		unsigned long *sum, unsigned long *pkts)
+{
+	int retv = 0, sysret;
+	struct pollfd pfd;
+
+	pfd.fd = sock;
+	pfd.revents = 0;
+	pfd.events = POLLIN;
+	do {
+		sysret = poll(&pfd, 1, 250);
+		if (unlikely(sysret == -1)) {
+			if (errno != EINTR)
+				fprintf(stderr, "poll failed: %s\n",
+						strerror(errno));
+			retv = errno;
+			break;
+		} else if (sysret == 0)
+			break;
+		sysret = recv(sock, buf, buflen, 0);
+		if (unlikely(sysret == -1)) {
+			if (errno != EINTR)
+				fprintf(stderr, "recv failed: %s\n", strerror(errno));
+			retv = errno;
+			break;
+		}
+		*sum += sysret;
+		*pkts += 1;
+	} while (global_exit == 0);
+
+	return retv;
+}
+
+static int do_udp_server(int sock)
+{
+	int retv = 0, sysret, len;
+	struct sockaddr_in peer;
+	socklen_t peerlen;
+	struct timespec tm0, tm1;
+	char *buf;
+	unsigned long sum, pkts;
+
+	buf = malloc(buflen);
+	if (unlikely(buf == NULL)) {
+		fprintf(stderr, "Out of Memory!\n");
+		return ENOMEM;
+	}
+	do {
+		sum = 0;
+		pkts = 0;
+		peerlen = sizeof(peer);
+		sysret = recvfrom(sock, buf, buflen, 0,
+				(struct sockaddr *)&peer, &peerlen);
+		clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
+		if (unlikely(sysret == -1)) {
+			if (errno != EINTR)
+				fprintf(stderr, "recvfrom failed: %s\n", strerror(errno));
+			retv = errno;
+			goto exit_10;
+		}
+		sum += sysret;
+		pkts += 1;
+		retv = receive_udp(sock, buf, buflen, &sum, &pkts);
+		if (unlikely(retv != 0))
+			goto exit_10;
+		clock_gettime(CLOCK_MONOTONIC_COARSE, &tm1);
+		printf("Total %lu packets received.\n", pkts);
+		len = sprintf(buf, "%lu %lu", sum, tm_elapsed(&tm0, &tm1));
+		sysret = sendto(sock, buf, len + 1, 0,
+				(const struct sockaddr *)&peer, sizeof(peer));
+		if (unlikely(sysret == -1)) {
+			fprintf(stderr, "sendto failed: %s\n", strerror(errno));
+			retv = errno;
+		}
+	} while (global_exit == 0);
+
 exit_10:
 	free(buf);
 	return retv;
@@ -265,13 +347,13 @@ static int do_tcp_server(int sock)
 	return retv;
 }
 
-enum TCPUDP {TCP = 0, UDP = 1};
+enum UDPTCP {TCP = 0, UDP = 1};
 
 struct cmd_options {
 	const char *svrip, *port;
 	int interval;
 	int role;
-	enum TCPUDP tcp;
+	enum UDPTCP udp;
 };
 
 int main(int argc, char *argv[])
@@ -279,7 +361,7 @@ int main(int argc, char *argv[])
 	int sock, sysret, retv = 0;
 	struct addrinfo hints, *res;
 	struct sigaction act;
-	int c, fin;
+	int c, fin, socktype;
 	struct cmd_options cmdopt;
 	extern int optind, opterr, optopt;
 
@@ -303,6 +385,12 @@ int main(int argc, char *argv[])
 			case 'p':
 				cmdopt.port = optarg;
 				break;
+			case 't':
+				cmdopt.udp = TCP;
+				break;
+			case 'u':
+				cmdopt.udp = UDP;
+				break;
 			default:
 				assert(0);
 		}
@@ -311,6 +399,10 @@ int main(int argc, char *argv[])
 		cmdopt.interval = 60;
 	if (cmdopt.port == NULL)
 		cmdopt.port = default_port;
+	if (cmdopt.udp == UDP)
+		socktype = SOCK_DGRAM;
+	else
+		socktype = SOCK_STREAM;
 
 	if (optind == argc) {
 		cmdopt.role = 1;
@@ -326,14 +418,14 @@ int main(int argc, char *argv[])
 	sigaction(SIGTERM, &act, NULL);
 	sigaction(SIGALRM, &act, NULL);
 
-	sock = socket(AF_INET, SOCK_STREAM, 0);
+	sock = socket(AF_INET, socktype, 0);
 	if (unlikely(sock == -1)) {
 		fprintf(stderr, "socket creation failed: %s\n", strerror(errno));
 		return 5;
 	}
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_socktype = socktype;
 	if (cmdopt.role == 1) {
 		hints.ai_flags = AI_PASSIVE|AI_NUMERICSERV;
 		sysret = getaddrinfo(NULL, cmdopt.port, &hints, &res);
@@ -348,7 +440,10 @@ int main(int argc, char *argv[])
 			retv = errno;
 			goto exit_20;
 		}
-		retv = do_tcp_server(sock);
+		if (cmdopt.udp == TCP)
+			retv = do_tcp_server(sock);
+		else
+			retv = do_udp_server(sock);
 	} else {
 		sysret = getaddrinfo(cmdopt.svrip, cmdopt.port, &hints, &res);
 		if (unlikely(sysret)) {
