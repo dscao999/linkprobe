@@ -28,6 +28,16 @@ static void sig_handler(int sig)
 		finish_up = 1;
 }
 
+enum UDPTCP {TCP = 0, UDP = 1};
+
+struct cmd_options {
+	const char *svrip, *port;
+	int interval;
+	int role;
+	int sndlen;
+	enum UDPTCP udp;
+};
+
 static struct list_head ths = LIST_HEAD_INIT(ths);
 
 struct thread_arg {
@@ -140,19 +150,20 @@ exit_10:
 }
 
 static int do_tcp_server(int sock);
-static int do_client(int sock, int interval);
+static int do_client(int sock, const struct cmd_options *opt);
 static int do_udp_server(int sock);
 
-static int do_client(int sock, int interval)
+static int do_client(int sock, const struct cmd_options *opt)
 {
 	char *buf;
-	int retv = 0, sysret;
+	int retv = 0, sysret, sndlen;
 	timer_t timerid;
 	struct sigevent sevent;
 	struct itimerspec itm;
 	unsigned long seq, numbytes, etm;
 
-	buf = malloc(buflen);
+	sndlen = opt->sndlen;
+	buf = malloc(sndlen);
 	if (unlikely(!buf)) {
 		fprintf(stderr, "Out of memory!\n");
 		return ENOMEM;
@@ -170,7 +181,7 @@ static int do_client(int sock, int interval)
 	finish_up = 0;
 	seq = 0;
 	memset(&itm, 0, sizeof(itm));
-	itm.it_value.tv_sec = interval;
+	itm.it_value.tv_sec = opt->interval;
 	sysret = timer_settime(timerid, 0, &itm, NULL);
 	if (unlikely(sysret == -1)) {
 		fprintf(stderr, "timer_settime failed: %sn\n", strerror(errno));
@@ -179,7 +190,7 @@ static int do_client(int sock, int interval)
 	}
 	do {
 		*((unsigned long *)buf) = seq++;
-		sysret = send(sock, buf, buflen, 0);
+		sysret = send(sock, buf, sndlen, 0);
 		if (unlikely(sysret == -1 && errno != EINTR)) {
 			fprintf(stderr, "send failed: %s\n", strerror(errno));
 			retv = errno;
@@ -187,7 +198,7 @@ static int do_client(int sock, int interval)
 		}
 	} while (global_exit == 0 && finish_up == 0);
 	double ratio;
-	sysret = recv(sock, buf, buflen, 0);
+	sysret = recv(sock, buf, sndlen, 0);
 	if (unlikely(sysret == -1)) {
 		fprintf(stderr, "recv failed: %s\n", strerror(errno));
 	} else {
@@ -258,6 +269,7 @@ static int do_udp_server(int sock)
 		peerlen = sizeof(peer);
 		sysret = recvfrom(sock, buf, buflen, 0,
 				(struct sockaddr *)&peer, &peerlen);
+		printf("Begin receiving...\n");
 		clock_gettime(CLOCK_MONOTONIC_COARSE, &tm0);
 		if (unlikely(sysret == -1)) {
 			if (errno != EINTR)
@@ -347,15 +359,6 @@ static int do_tcp_server(int sock)
 	return retv;
 }
 
-enum UDPTCP {TCP = 0, UDP = 1};
-
-struct cmd_options {
-	const char *svrip, *port;
-	int interval;
-	int role;
-	enum UDPTCP udp;
-};
-
 int main(int argc, char *argv[])
 {
 	int sock, sysret, retv = 0;
@@ -368,7 +371,7 @@ int main(int argc, char *argv[])
 	memset(&cmdopt, 0, sizeof(cmdopt));
 	fin = 0;
 	do {
-		c = getopt(argc, argv, ":l:p:tu");
+		c = getopt(argc, argv, ":l:p:m:tu");
 		switch(c) {
 			case ':':
 				fprintf(stderr, "Missing argument for '%c'\n", (char)optopt);
@@ -391,10 +394,14 @@ int main(int argc, char *argv[])
 			case 'u':
 				cmdopt.udp = UDP;
 				break;
+			case 'm':
+				cmdopt.sndlen = atoi(optarg);
+				break;
 			default:
 				assert(0);
 		}
 	} while (fin == 0);
+
 	if (cmdopt.interval == 0)
 		cmdopt.interval = 60;
 	if (cmdopt.port == NULL)
@@ -410,6 +417,13 @@ int main(int argc, char *argv[])
 	} else {
 		cmdopt.role = 0;
 		cmdopt.svrip = argv[optind];
+	}
+	if (cmdopt.sndlen == 0) {
+		if (cmdopt.udp == UDP && cmdopt.role == 0) {
+			fprintf(stderr, "A packet length must be specified for UDP\n");
+			return 11;
+		} else
+			cmdopt.sndlen = buflen;
 	}
 
 	memset(&act, 0, sizeof(act));
@@ -457,7 +471,7 @@ int main(int argc, char *argv[])
 			retv = errno;
 			goto exit_20;
 		}
-		retv = do_client(sock, cmdopt.interval);
+		retv = do_client(sock, &cmdopt);
 	}
 
 exit_20:
