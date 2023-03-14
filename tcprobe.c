@@ -202,7 +202,7 @@ static int do_client(int sock, const struct cmd_options *opt)
 	if (unlikely(sysret == -1)) {
 		fprintf(stderr, "recv failed: %s\n", strerror(errno));
 	} else {
-		printf("Total %lu packets sent\n", seq+1);
+		printf("Total %lu packets sent\n", seq);
 		sscanf(buf, "%lu %lu", &numbytes, &etm);
 		ratio = ((double)numbytes)/(((double)etm)/1000000);
 		printf("Bytes: %lu, Time: %lu\n", numbytes, etm/1000000);
