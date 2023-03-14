@@ -580,7 +580,7 @@ static int check_ring(const struct cmdopts *opt, struct statistics *st,
 		if (unlikely(!payload||ntohl(ippkt->mark) != mark_value||
 				(ippkt->msgtyp != htonl(V_BULK) &&
 				 ippkt->msgtyp != htonl(V_LAST_PACKET)))) {
-			st->bn += pktlen + 18;
+			st->bn += pktlen;
 			st->bcnt += 1;
 		} else {
 			if (unlikely(verbose >= 3))
@@ -647,7 +647,6 @@ static void *receive_drain(void *arg)
 					"port: %hu\n", ntohs(pkt->udph.source),
 					ntohs(pkt->udph.dest));
 		} else if (pkt->msgtyp == htonl(V_END_TEST)) {
-			res = strchr(payload, ' ');
 			sscanf(res, "%lu %lu", &total_bytes, &usecs);
 			*drain->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
 			printf("End Test received by receive drain. %lu, %lu\n", total_bytes, usecs);
@@ -799,18 +798,19 @@ static int init_sock(struct worker_params *wparam, int rx, int fanout)
 	} else {
 		wparam->buf = NULL;
 		memset(&req_ring, 0, sizeof(req_ring));
-		req_ring.tp_frame_size = pinf->buflen;
+		if (rx == 1) {
+			req_ring.tp_frame_size = 128 * 1024;
+			ring = PACKET_RX_RING;
+			flag = TP_STATUS_KERNEL;
+		} else {
+			req_ring.tp_frame_size = pinf->buflen;
+			ring = PACKET_TX_RING;
+			flag = TP_STATUS_AVAILABLE;
+		}
 		req_ring.tp_block_size = req_ring.tp_frame_size * opt->nrframe;
 		req_ring.tp_block_nr = opt->nrblock;
 		req_ring.tp_frame_nr = opt->nrblock * opt->nrframe;
 		rxr->size = req_ring.tp_block_size * req_ring.tp_block_nr;
-		if (rx == 1) {
-			ring = PACKET_RX_RING;
-			flag = TP_STATUS_KERNEL;
-		} else {
-			ring = PACKET_TX_RING;
-			flag = TP_STATUS_AVAILABLE;
-		}
 		sysret = setsockopt(dlsock, SOL_PACKET, ring, &req_ring,
 				sizeof(req_ring));
 		if (unlikely(sysret == -1)) {
