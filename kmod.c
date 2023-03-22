@@ -20,10 +20,8 @@ elog(int line, const char *file, const char *func, const char *syscall)
 int search_token(int fd, const char *token, int FS)
 {
 	int sysret, retv, buflen, bitpos, offset;
-	int fin;
 	char *buf, *ln, *nxtbuf;
 
-	fin = 0;
 	retv = 0;
 	bitpos = 4;
 	buflen = (1 << bitpos);
@@ -45,7 +43,7 @@ int search_token(int fd, const char *token, int FS)
 			offset += sysret;
 			buf[offset] = 0;
 			ln = strrchr(buf, FS);
-		} while (ln == NULL && offset < buflen && sysret > 0);
+		} while (ln == NULL && offset < buflen);
 		if (strstr(buf, token)) {
 			retv = 1;
 			break;
@@ -97,12 +95,12 @@ int lsmod(const char *mod_name)
 		goto exit_10;
 	}
 	if (sysret == 0) {
-		fflush(NULL);
 		close(rd);
-		fclose(stdout);
-		stdout = fdopen(dup(wrt), "w");
-		fclose(stderr);
-		stderr = fdopen(dup(wrt), "w");
+		fflush(NULL);
+		close(fileno(stdout));
+		dup(wrt);
+		close(fileno(stderr));
+		dup(wrt);
 		close(wrt);
 		fclose(stdin);
 		sysret = execlp("lsmod", "lsmod", NULL);
