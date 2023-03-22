@@ -31,6 +31,12 @@ txmmap: txmmap.o
 tcprobe: tcprobe.o
 	$(LINK.o) $^ -lrt -o $@
 
+kmod:	CFLAGS = -Wall -g -D_GNU_SOURCE
+kmod:	LDFLAGS = 
+
+kmod:	kmod.o
+	$(LINK.o) $^ -o $@
+
 clean:
 	rm -rf *.o
 	rm -rf $(ALL)
