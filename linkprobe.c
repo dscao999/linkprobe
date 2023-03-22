@@ -600,7 +600,7 @@ static void *receive_drain(void *arg)
 	struct drain_thread *drain = (struct drain_thread *)arg;
 	struct pollfd pfd;
 	int sysret, buflen, retv;
-	const char *payload, *res;
+	const char *payload;
 	char *buf;
 	unsigned long total_bytes, usecs;
 	struct ip_packet *pkt;
@@ -647,7 +647,7 @@ static void *receive_drain(void *arg)
 					"port: %hu\n", ntohs(pkt->udph.source),
 					ntohs(pkt->udph.dest));
 		} else if (pkt->msgtyp == htonl(V_END_TEST)) {
-			sscanf(res, "%lu %lu", &total_bytes, &usecs);
+			sscanf(payload, "%lu %lu", &total_bytes, &usecs);
 			*drain->bandwidth = ((double)total_bytes) / (((double)usecs) / 1000000);
 			printf("End Test received by receive drain. %lu, %lu\n", total_bytes, usecs);
 		}
