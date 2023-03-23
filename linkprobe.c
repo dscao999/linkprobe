@@ -798,12 +798,11 @@ static int init_sock(struct worker_params *wparam, int rx, int fanout)
 	} else {
 		wparam->buf = NULL;
 		memset(&req_ring, 0, sizeof(req_ring));
+		req_ring.tp_frame_size = pinf->buflen;
 		if (rx == 1) {
-			req_ring.tp_frame_size = 128 * 1024;
 			ring = PACKET_RX_RING;
 			flag = TP_STATUS_KERNEL;
 		} else {
-			req_ring.tp_frame_size = pinf->buflen;
 			ring = PACKET_TX_RING;
 			flag = TP_STATUS_AVAILABLE;
 		}
