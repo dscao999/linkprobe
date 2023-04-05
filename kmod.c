@@ -7,6 +7,7 @@
 #include <sys/wait.h>
 #include <assert.h>
 #include <stdlib.h>
+#include "pktgen.h"
 
 #define unlikely(x)	__builtin_expect(!!(x), 0)
 
@@ -96,11 +97,12 @@ int lsmod(const char *mod_name)
 	}
 	if (sysret == 0) {
 		close(rd);
-		fclose(stdout);
-		stdout = fdopen(dup(wrt), "w");
-		fclose(stderr);
-		stderr = fdopen(dup(wrt), "w");
-		fclose(stdin);
+		fflush(NULL);
+		close(fileno(stdout));
+		dup(wrt);
+		close(fileno(stderr));
+		dup(wrt);
+		close(wrt);
 		sysret = execlp("lsmod", "lsmod", NULL);
 		if (unlikely(sysret == -1)) {
 			syscall_log(execlp);
@@ -120,6 +122,34 @@ int lsmod(const char *mod_name)
 exit_10:
 	close(pipd[0]);
 	close(pipd[1]);
+	return retv;
+}
+
+int rmmod(const char *mod_name)
+{
+	int retv, sysret, status;
+
+	retv = 0;
+	sysret = fork();
+	if (unlikely(sysret == -1)) {
+		syscall_log(fork);
+		return -errno;
+	} else if (sysret == 0) {
+		fclose(stdin);
+		sysret = execlp("rmmod", "rmmod", mod_name, NULL);
+		if (unlikely(sysret == -1)) {
+			syscall_log(execlp);
+			exit(errno);
+		}
+	}
+	status = 0;
+	sysret = waitpid(sysret, &status, 0);
+	if (unlikely(sysret == -1)) {
+		syscall_log(waitpid);
+		return -errno;
+	}
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+		retv = -1;
 	return retv;
 }
 
@@ -174,5 +204,8 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "Missing kernel module pktgen!\n");
 		return 1;
 	}
-	return 0;
+	retv = pktgen_control("reset");
+	if (retv < 0)
+		retv = -retv;
+	return retv;
 }

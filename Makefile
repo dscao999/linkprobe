@@ -34,7 +34,7 @@ tcprobe: tcprobe.o
 kmod:	CFLAGS = -Wall -g -D_GNU_SOURCE
 kmod:	LDFLAGS = 
 
-kmod:	kmod.o
+kmod:	kmod.o pktgen.o
 	$(LINK.o) $^ -o $@
 
 clean:

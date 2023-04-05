@@ -117,10 +117,8 @@ static void *recv_horse(void *arg)
 			fprintf(stderr, "poll failed: %s\n", strerror(errno));
 			retv = errno;
 			goto exit_10;
-		} else if (unlikely(sysret == 0)) {
-			fprintf(stderr, "Timeout! Test Ends\n");
+		} else if (unlikely(sysret == 0))
 			break;
-		}
 		if ((pfd.revents & POLLIN) == 0) {
 			fprintf(stderr, "TCP link error.\n");
 			retv = 254;
@@ -459,6 +457,7 @@ int main(int argc, char *argv[])
 		else
 			retv = do_udp_server(sock);
 	} else {
+		hints.ai_flags = AI_NUMERICSERV;
 		sysret = getaddrinfo(cmdopt.svrip, cmdopt.port, &hints, &res);
 		if (unlikely(sysret)) {
 			fprintf(stderr, "getaddrinfo failed: %s\n", gai_strerror(sysret));

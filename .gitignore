@@ -52,6 +52,8 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
+.*.swp
+core
 cscope.file
 
 capether
@@ -60,3 +62,4 @@ linkprobe
 udpcom
 tcprobe
 txmmap
+kmod
