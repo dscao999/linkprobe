@@ -75,7 +75,7 @@ static const char *nic_cmds[] = {
 	"count", "src_min", "src_max", "dst_min", "dst_max",
 	"src_mac", "dst_mac", "clear_counters",
 	"udp_src_min", "udp_src_max", "udp_dst_min", "udp_dst_max",
-	"pkt_size", NULL
+	"pkt_size", "flag", NULL
 };
 
 enum NICMD {COUNT = 0, SRCMIN = 1, SRCMAX = 2, DSTMIN = 3, DSTMAX = 4,
@@ -84,7 +84,7 @@ enum NICMD {COUNT = 0, SRCMIN = 1, SRCMAX = 2, DSTMIN = 3, DSTMAX = 4,
 	PKTSIZE = 12, INVCMD = 13
 };
 
-int nic_control(const char *nic, const char *cmd, const char *arg)
+int pktgen_nic(const char *nic, const char *cmd, const char *arg)
 {
 	const char **cmdary;
 	int retv;
