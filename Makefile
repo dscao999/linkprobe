@@ -31,14 +31,14 @@ txmmap: txmmap.o
 tcprobe: tcprobe.o
 	$(LINK.o) $^ -lrt -o $@
 
-kmod:	CFLAGS = -Wall -g -D_GNU_SOURCE
-kmod:	LDFLAGS = 
+tstmod: CFLAGS = -Wall -g -D_GNU_SOURCE
+tstmod: LDFLAGS =
 
-kmod:	kmod.o pktgen.o
+tstmod:	test_kmod.o kmod.o pktgen.o
 	$(LINK.o) $^ -o $@
 
 clean:
 	rm -rf *.o
-	rm -rf $(ALL)
+	rm -rf $(ALL) tstmod
 
 -include header-dep.mak

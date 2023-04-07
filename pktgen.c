@@ -2,18 +2,37 @@
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
+#include "misc_utils.h"
+#include "kmod.h"
 #include "pktgen.h"
-
-#define unlikely(x)	__builtin_expect(!!(x), 0)
-#define syscall_log(syscall)	\
-	fprintf(stderr, "%s failed: %s. At line %d file %s, in function: %s\n",\
-			#syscall, strerror(errno),	\
-			__LINE__, __FILE__, __func__);
 
 static const char PKTGEN_BASEDIR[] = "/proc/net/pktgen";
 static const char PKTGEN_THREAD[] = "/proc/net/pktgen/kpktgen_";
 static const char PKTGEN_CTRL[] = "/proc/net/pktgen/pgctrl";
 static const char CPUINFO[] = "/proc/cpuinfo";
+
+int check_pktgen(void)
+{
+	int retv;
+
+	retv = lsmod("pktgen");
+	if (retv == 1)
+		return 0;
+	else if (retv == 0)
+		retv = insmod("pktgen");
+	if (retv)
+		fprintf(stderr, "No pktgen module\n");
+	return retv;
+}
+
+void exit_pktgen(void)
+{
+	int retv;
+
+	retv = rmmod("pktgen");
+	if (retv < 0)
+		fprintf(stderr, "Cannot remove module pktgen\n");
+}
 
 static const char *ctrl_cmd[] = {
 	"start", "stop", "reset", NULL

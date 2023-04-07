@@ -62,4 +62,4 @@ linkprobe
 udpcom
 tcprobe
 txmmap
-kmod
+tstmod
