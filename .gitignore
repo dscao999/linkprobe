@@ -54,7 +54,7 @@ dkms.conf
 
 .*.swp
 core
-cscope.file
+cscope.files
 
 capether
 checksum
