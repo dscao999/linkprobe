@@ -1324,7 +1324,7 @@ static int do_client(struct worker_params *wparam)
 		}
 		retv = wait_recv(wparam, &pfd);
 		count += 1;
-		if (!opt->probe_only && count == 9) {
+		if (unlikely(!opt->probe_only && count == 9)) {
 			sprintf(mesg, "%s %d", PROBE, wparam->mark_value);
 			msgtyp = htonl(V_PROBE);
 		}
