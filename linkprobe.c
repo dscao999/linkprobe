@@ -24,19 +24,9 @@
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <sys/mman.h>
+#include "misc_utils.h"
 #include "enumnet.h"
 #include "ipudp.h"
-
-#ifndef unlikely
-#define unlikely(x)	__builtin_expect(!!(x), 0)
-#endif
-
-#define	WRITE_ONCE(x, val)						\
-	do {								\
-		*(volatile typeof(x) *)&(x) = (val);			\
-	} while (0)
-
-#define READ_ONCE(x)	*(volatile typeof(x) *)&(x)
 
 #define POLL_TIME	250
 #define POLL_CNT	4

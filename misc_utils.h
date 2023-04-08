@@ -12,4 +12,7 @@
 	fprintf(stderr, "Out of Memory! Line: %d File: %s Function: '%s'\n", \
 			__LINE__, __FILE__, __func__)
 
+#define WRITE_ONCE(x, val)	*(volatile typeof(x) *)&(x) = (val)
+#define READ_ONCE(x)		*(volatile typeof(x) *)&(x)
+
 #endif  /* MISC_UTILS_DSCAO__ */
