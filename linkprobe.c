@@ -1307,13 +1307,8 @@ static int do_client(struct worker_params *wparam)
 	wparam->mark_value = tm.tv_nsec & 0x0ffffffff;
 	ipkt = (struct ip_packet *)wparam->buf;
 	ipkt->mark = htonl(wparam->mark_value);
-	if (opt->probe_only) {
-		sprintf(mesg, "%s", PROBE_ONLY);
-		msgtyp = htonl(V_PROBE_ONLY);
-	} else {
-		sprintf(mesg, "%s %d", PROBE, wparam->mark_value);
-		msgtyp = htonl(V_PROBE);
-	}
+	sprintf(mesg, "%s", PROBE_ONLY);
+	msgtyp = htonl(V_PROBE_ONLY);
 	count = 0;
 	do {
 		ipkt->msgtyp = msgtyp;
@@ -1329,6 +1324,10 @@ static int do_client(struct worker_params *wparam)
 		}
 		retv = wait_recv(wparam, &pfd);
 		count += 1;
+		if (!opt->probe_only && count == 9) {
+			sprintf(mesg, "%s %d", PROBE, wparam->mark_value);
+			msgtyp = htonl(V_PROBE);
+		}
 	} while (global_exit == 0 && retv == 0 && count < 10);
 	if (retv == 0)
 		printf("Link OK: ");
@@ -1340,6 +1339,7 @@ static int do_client(struct worker_params *wparam)
 	printf("\n");
 	if (retv != 0 || opt->probe_only)
 		return retv;
+
 
 	numths = -1;
 	count = 0;
